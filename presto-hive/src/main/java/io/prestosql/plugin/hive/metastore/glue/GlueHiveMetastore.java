@@ -183,7 +183,9 @@ public class GlueHiveMetastore
 
     private static AWSGlueAsync createAsyncGlueClient(GlueHiveMetastoreConfig config, Optional<RequestHandler2> requestHandler)
     {
-        ClientConfiguration clientConfig = new ClientConfiguration().withMaxConnections(config.getMaxGlueConnections());
+        ClientConfiguration clientConfig = new ClientConfiguration()
+                .withMaxConnections(config.getMaxGlueConnections())
+                .withMaxErrorRetry(config.getMaxGlueErrorRetries());
         AWSGlueAsyncClientBuilder asyncGlueClientBuilder = AWSGlueAsyncClientBuilder.standard()
                 .withClientConfiguration(clientConfig);
 
@@ -609,6 +611,12 @@ public class GlueHiveMetastore
     public void commentTable(HiveIdentity identity, String databaseName, String tableName, Optional<String> comment)
     {
         throw new PrestoException(NOT_SUPPORTED, "Table comment is not yet supported by Glue service");
+    }
+
+    @Override
+    public void commentColumn(HiveIdentity identity, String databaseName, String tableName, String columnName, Optional<String> comment)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "Column comment is not yet supported by Glue service");
     }
 
     @Override

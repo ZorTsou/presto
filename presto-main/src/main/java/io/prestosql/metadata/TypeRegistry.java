@@ -55,10 +55,10 @@ import static io.prestosql.spi.type.P4HyperLogLogType.P4_HYPER_LOG_LOG;
 import static io.prestosql.spi.type.QuantileDigestParametricType.QDIGEST;
 import static io.prestosql.spi.type.RealType.REAL;
 import static io.prestosql.spi.type.SmallintType.SMALLINT;
-import static io.prestosql.spi.type.TimeType.TIME;
+import static io.prestosql.spi.type.TimeParametricType.TIME;
 import static io.prestosql.spi.type.TimeWithTimeZoneType.TIME_WITH_TIME_ZONE;
-import static io.prestosql.spi.type.TimestampType.TIMESTAMP;
-import static io.prestosql.spi.type.TimestampWithTimeZoneType.TIMESTAMP_WITH_TIME_ZONE;
+import static io.prestosql.spi.type.TimestampParametricType.TIMESTAMP;
+import static io.prestosql.spi.type.TimestampWithTimeZoneParametricType.TIMESTAMP_WITH_TIME_ZONE;
 import static io.prestosql.spi.type.TinyintType.TINYINT;
 import static io.prestosql.spi.type.VarbinaryType.VARBINARY;
 import static io.prestosql.sql.analyzer.TypeSignatureTranslator.toTypeSignature;
@@ -106,10 +106,7 @@ final class TypeRegistry
         addType(REAL);
         addType(VARBINARY);
         addType(DATE);
-        addType(TIME);
         addType(TIME_WITH_TIME_ZONE);
-        addType(TIMESTAMP);
-        addType(TIMESTAMP_WITH_TIME_ZONE);
         addType(INTERVAL_YEAR_MONTH);
         addType(INTERVAL_DAY_TIME);
         addType(HYPER_LOG_LOG);
@@ -132,6 +129,9 @@ final class TypeRegistry
         addParametricType(MAP);
         addParametricType(FUNCTION);
         addParametricType(QDIGEST);
+        addParametricType(TIMESTAMP);
+        addParametricType(TIMESTAMP_WITH_TIME_ZONE);
+        addParametricType(TIME);
 
         parametricTypeCache = CacheBuilder.newBuilder()
                 .maximumSize(1000)

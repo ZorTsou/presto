@@ -13,9 +13,9 @@
  */
 package io.prestosql.plugin.hive.metastore.thrift;
 
-import alluxio.shaded.client.com.google.common.cache.CacheBuilder;
-import alluxio.shaded.client.com.google.common.cache.CacheLoader;
-import alluxio.shaded.client.com.google.common.cache.LoadingCache;
+import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.CacheLoader;
+import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -104,6 +104,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Strings.isNullOrEmpty;
@@ -127,6 +128,7 @@ import static io.prestosql.plugin.hive.metastore.thrift.ThriftMetastoreUtil.from
 import static io.prestosql.plugin.hive.metastore.thrift.ThriftMetastoreUtil.fromPrestoPrincipalType;
 import static io.prestosql.plugin.hive.metastore.thrift.ThriftMetastoreUtil.fromRolePrincipalGrants;
 import static io.prestosql.plugin.hive.metastore.thrift.ThriftMetastoreUtil.getHiveBasicStatistics;
+import static io.prestosql.plugin.hive.metastore.thrift.ThriftMetastoreUtil.isAvroTableWithSchemaSet;
 import static io.prestosql.plugin.hive.metastore.thrift.ThriftMetastoreUtil.parsePrivilege;
 import static io.prestosql.plugin.hive.metastore.thrift.ThriftMetastoreUtil.toMetastoreApiPartition;
 import static io.prestosql.plugin.hive.metastore.thrift.ThriftMetastoreUtil.updateStatisticsParameters;
@@ -511,7 +513,17 @@ public class ThriftHiveMetastore
         io.prestosql.plugin.hive.metastore.Table table = fromMetastoreApiTable(modifiedTable);
         OptionalLong rowCount = basicStatistics.getRowCount();
         List<ColumnStatisticsObj> metastoreColumnStatistics = updatedStatistics.getColumnStatistics().entrySet().stream()
-                .map(entry -> createMetastoreColumnStatistics(entry.getKey(), table.getColumn(entry.getKey()).get().getType(), entry.getValue(), rowCount))
+                .flatMap(entry -> {
+                    Optional<Column> column = table.getColumn(entry.getKey());
+                    if (column.isEmpty() && isAvroTableWithSchemaSet(modifiedTable)) {
+                        // Avro table can have different effective schema than declared in metastore. Still, metastore does not allow
+                        // to store statistics for a column it does not know about.
+                        return Stream.of();
+                    }
+
+                    HiveType type = column.orElseThrow(() -> new IllegalStateException("Column not found: " + entry.getKey())).getType();
+                    return Stream.of(createMetastoreColumnStatistics(entry.getKey(), type, entry.getValue(), rowCount));
+                })
                 .collect(toImmutableList());
         if (!metastoreColumnStatistics.isEmpty()) {
             setTableColumnStatistics(identity, databaseName, tableName, metastoreColumnStatistics);
@@ -1733,7 +1745,8 @@ public class ThriftHiveMetastore
                             new HiveObjectRef(TABLE, databaseName, tableName, null, null),
                             grantee.getName(),
                             fromPrestoPrincipalType(grantee.getType()),
-                            privilegeGrantInfo));
+                            privilegeGrantInfo,
+                            "SQL"));
         }
         return new PrivilegeBag(privilegeBagBuilder.build());
     }
@@ -1790,7 +1803,7 @@ public class ThriftHiveMetastore
         throw propagate(firstException);
     }
 
-    // TODO instead of whitelisting exceptions we propagate we should recognize exceptions which we suppress and try different alternative call
+    // TODO we should recognize exceptions which we suppress and try different alternative call
     // this requires product tests with HDP 3
     private static boolean defaultIsValidExceptionalResponse(Exception exception)
     {

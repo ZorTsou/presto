@@ -24,6 +24,7 @@ import static io.prestosql.spi.type.DateType.DATE;
 import static io.prestosql.spi.type.TimeType.TIME;
 import static io.prestosql.spi.type.TimeWithTimeZoneType.TIME_WITH_TIME_ZONE;
 import static io.prestosql.spi.type.TimeZoneKey.UTC_KEY;
+import static io.prestosql.spi.type.TimeZoneKey.getTimeZoneKeyForOffset;
 import static io.prestosql.spi.type.TimestampType.TIMESTAMP;
 import static io.prestosql.spi.type.TimestampWithTimeZoneType.TIMESTAMP_WITH_TIME_ZONE;
 import static java.util.Collections.emptyMap;
@@ -43,10 +44,10 @@ public class TestCustomDateTimeJsonFieldDecoder
         timestampTester.assertDecodedAs("\"02/2018/19 9:20:11\"", TIMESTAMP, 1519032011000L);
         timestampWithTimeZoneTester.assertDecodedAs("\"02/2018/19 11:20:11 +02:00\"", TIMESTAMP, 1519032011000L);
         timestampTester.assertDecodedAs("\"02/2018/19 9:20:11\"", TIMESTAMP_WITH_TIME_ZONE, packDateTimeWithZone(1519032011000L, UTC_KEY));
-        timestampWithTimeZoneTester.assertDecodedAs("\"02/2018/19 11:20:11 +02:00\"", TIMESTAMP_WITH_TIME_ZONE, packDateTimeWithZone(1519032011000L, UTC_KEY)); // TODO: extract TZ from pattern
-        timeTester.assertDecodedAs("\"15:13:18\"", TIME, 47718000);
-        timeJustHourTester.assertDecodedAs("\"15\"", TIME, 54000000);
-        timeJustHourTester.assertDecodedAs("15", TIME, 54000000);
+        timestampWithTimeZoneTester.assertDecodedAs("\"02/2018/19 11:20:11 +02:00\"", TIMESTAMP_WITH_TIME_ZONE, packDateTimeWithZone(1519032011000L, getTimeZoneKeyForOffset(120))); // TODO: extract TZ from pattern
+        timeTester.assertDecodedAs("\"15:13:18\"", TIME, 47_718_000_000_000_000L);
+        timeJustHourTester.assertDecodedAs("\"15\"", TIME, 54_000_000_000_000_000L);
+        timeJustHourTester.assertDecodedAs("15", TIME, 54_000_000_000_000_000L);
         timeTester.assertDecodedAs("\"15:13:18\"", TIME_WITH_TIME_ZONE, packDateTimeWithZone(47718000, UTC_KEY));
         dateTester.assertDecodedAs("\"02/2018/11\"", DATE, 17573);
     }
@@ -73,11 +74,11 @@ public class TestCustomDateTimeJsonFieldDecoder
     @Test
     public void testDecodeInvalid()
     {
-        timestampTester.assertInvalidInput("1", TIMESTAMP, "could not parse value '1' as 'timestamp' for column 'some_column'");
-        timestampTester.assertInvalidInput("{}", TIMESTAMP, "could not parse non-value node as 'timestamp' for column 'some_column'");
-        timestampTester.assertInvalidInput("\"a\"", TIMESTAMP, "could not parse value 'a' as 'timestamp' for column 'some_column'");
-        timestampTester.assertInvalidInput("\"15:13:18\"", TIMESTAMP, "could not parse value '15:13:18' as 'timestamp' for column 'some_column'");
-        timestampTester.assertInvalidInput("\"02/2018/11\"", TIMESTAMP, "could not parse value '02/2018/11' as 'timestamp' for column 'some_column'");
+        timestampTester.assertInvalidInput("1", TIMESTAMP, "\\Qcould not parse value '1' as 'timestamp(3)' for column 'some_column'\\E");
+        timestampTester.assertInvalidInput("{}", TIMESTAMP, "\\Qcould not parse non-value node as 'timestamp(3)' for column 'some_column'\\E");
+        timestampTester.assertInvalidInput("\"a\"", TIMESTAMP, "\\Qcould not parse value 'a' as 'timestamp(3)' for column 'some_column'\\E");
+        timestampTester.assertInvalidInput("\"15:13:18\"", TIMESTAMP, "\\Qcould not parse value '15:13:18' as 'timestamp(3)' for column 'some_column'\\E");
+        timestampTester.assertInvalidInput("\"02/2018/11\"", TIMESTAMP, "\\Qcould not parse value '02/2018/11' as 'timestamp(3)' for column 'some_column'\\E");
     }
 
     @Test
@@ -95,6 +96,6 @@ public class TestCustomDateTimeJsonFieldDecoder
                 false);
         assertThatThrownBy(() -> new JsonRowDecoderFactory(new ObjectMapperProvider().get()).create(emptyMap(), ImmutableSet.of(columnHandle)))
                 .isInstanceOf(PrestoException.class)
-                .hasMessageMatching("invalid joda pattern 'XXMM/yyyy/dd H:m:sXX' passed as format hint for column 'some_column'");
+                .hasMessageMatching("invalid Joda Time pattern 'XXMM/yyyy/dd H:m:sXX' passed as format hint for column 'some_column'");
     }
 }

@@ -15,14 +15,18 @@ package io.prestosql.plugin.hive;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
+import com.qubole.rubix.core.CachingFileSystem;
 import io.prestosql.spi.Plugin;
 import io.prestosql.spi.connector.ConnectorFactory;
 import io.prestosql.testing.TestingConnectorContext;
 import org.testng.annotations.AfterClass;
+import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeClass;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static com.google.common.io.MoreFiles.deleteRecursively;
@@ -48,21 +52,32 @@ public class TestHiveHadoop2Plugin
         deleteRecursively(tempDirectory, ALLOW_INSECURE);
     }
 
+    @AfterMethod
+    @BeforeMethod
+    public void deinitializeRubix()
+    {
+        // revert static rubix initialization done by other tests
+        CachingFileSystem.deinitialize();
+    }
+
     @Test
     public void testS3SecurityMappingAndHiveCachingMutuallyExclusive()
+            throws IOException
     {
+        Path mappingConfig = Files.createTempFile(null, null);
         Plugin plugin = new HiveHadoop2Plugin();
         ConnectorFactory connectorFactory = Iterables.getOnlyElement(plugin.getConnectorFactories());
 
         assertThatThrownBy(() -> connectorFactory.create(
                 "test",
                 ImmutableMap.<String, String>builder()
-                        .put("hive.s3.security-mapping.config-file", "/tmp/blah.txt")
+                        .put("hive.s3.security-mapping.config-file", mappingConfig.toString())
                         .put("hive.cache.enabled", "true")
+                        .put("hive.metastore.uri", "thrift://foo:1234")
+                        .put("hive.cache.location", tempDirectory.toString())
                         .build(),
                 new TestingConnectorContext())
-                .shutdown())
-                .hasMessageContaining("S3 security mapping is not compatible with Hive caching");
+                .shutdown()).hasMessageContaining("S3 security mapping is not compatible with Hive caching");
     }
 
     @Test
@@ -76,6 +91,8 @@ public class TestHiveHadoop2Plugin
                 ImmutableMap.<String, String>builder()
                         .put("hive.gcs.use-access-token", "true")
                         .put("hive.cache.enabled", "true")
+                        .put("hive.metastore.uri", "thrift://foo:1234")
+                        .put("hive.cache.location", tempDirectory.toString())
                         .build(),
                 new TestingConnectorContext())
                 .shutdown())
@@ -93,10 +110,12 @@ public class TestHiveHadoop2Plugin
                 ImmutableMap.<String, String>builder()
                         .put("hive.hdfs.impersonation.enabled", "true")
                         .put("hive.cache.enabled", "true")
+                        .put("hive.metastore.uri", "thrift://foo:1234")
+                        .put("hive.cache.location", tempDirectory.toString())
                         .build(),
                 new TestingConnectorContext())
                 .shutdown())
-                .hasMessageContaining("Hdfs impersonation is not compatible with Hive caching");
+                .hasMessageContaining("HDFS impersonation is not compatible with Hive caching");
     }
 
     @Test
@@ -126,11 +145,33 @@ public class TestHiveHadoop2Plugin
                 "test",
                 ImmutableMap.<String, String>builder()
                         .put("hive.cache.enabled", "true")
+                        .put("hive.cache.start-server-on-coordinator", "true")
                         .put("hive.metastore.uri", "thrift://foo:1234")
                         .put("hive.cache.location", "/tmp/non/existing/directory")
                         .build(),
                 new TestingConnectorContext())
                 .shutdown())
                 .hasRootCauseMessage("None of the cache parent directories exists");
+
+        assertThatThrownBy(() -> connectorFactory.create(
+                "test",
+                ImmutableMap.<String, String>builder()
+                        .put("hive.cache.enabled", "true")
+                        .put("hive.cache.start-server-on-coordinator", "true")
+                        .put("hive.metastore.uri", "thrift://foo:1234")
+                        .build(),
+                new TestingConnectorContext())
+                .shutdown())
+                .hasRootCauseMessage("caching directories were not provided");
+
+        // cache directories should not be required when cache is not explicitly started on coordinator
+        connectorFactory.create(
+                "test",
+                ImmutableMap.<String, String>builder()
+                        .put("hive.cache.enabled", "true")
+                        .put("hive.metastore.uri", "thrift://foo:1234")
+                        .build(),
+                new TestingConnectorContext())
+                .shutdown();
     }
 }

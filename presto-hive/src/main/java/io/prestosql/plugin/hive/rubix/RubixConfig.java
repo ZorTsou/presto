@@ -15,12 +15,20 @@ package io.prestosql.plugin.hive.rubix;
 
 import com.qubole.rubix.spi.CacheConfig;
 import io.airlift.configuration.Config;
+import io.airlift.configuration.ConfigDescription;
+import io.airlift.units.Duration;
+import io.airlift.units.MinDuration;
 
+import javax.validation.constraints.Max;
+import javax.validation.constraints.Min;
 import javax.validation.constraints.NotNull;
+
+import java.util.Optional;
 
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.DAYS;
 
 public class RubixConfig
 {
@@ -55,7 +63,9 @@ public class RubixConfig
     }
 
     private ReadMode readMode = ReadMode.ASYNC;
-    private String cacheLocation;
+    private Optional<String> cacheLocation = Optional.empty();
+    private Duration cacheTtl = new Duration(7, DAYS);
+    private int diskUsagePercentage = CacheConfig.DEFAULT_DATA_CACHE_FULLNESS;
     private int bookKeeperServerPort = CacheConfig.DEFAULT_BOOKKEEPER_SERVER_PORT;
     private int dataTransferServerPort = CacheConfig.DEFAULT_DATA_TRANSFER_SERVER_PORT;
     private boolean startServerOnCoordinator;
@@ -74,7 +84,7 @@ public class RubixConfig
     }
 
     @NotNull
-    public String getCacheLocation()
+    public Optional<String> getCacheLocation()
     {
         return cacheLocation;
     }
@@ -82,7 +92,37 @@ public class RubixConfig
     @Config("hive.cache.location")
     public RubixConfig setCacheLocation(String location)
     {
-        this.cacheLocation = location;
+        this.cacheLocation = Optional.ofNullable(location);
+        return this;
+    }
+
+    @MinDuration("0s")
+    @NotNull
+    public Duration getCacheTtl()
+    {
+        return cacheTtl;
+    }
+
+    @Config("hive.cache.ttl")
+    @ConfigDescription("Time files will be kept in cache prior to eviction")
+    public RubixConfig setCacheTtl(Duration cacheTtl)
+    {
+        this.cacheTtl = cacheTtl;
+        return this;
+    }
+
+    @Min(0)
+    @Max(100)
+    public int getDiskUsagePercentage()
+    {
+        return diskUsagePercentage;
+    }
+
+    @Config("hive.cache.disk-usage-percentage")
+    @ConfigDescription("Percentage of disk space used for cached data")
+    public RubixConfig setDiskUsagePercentage(int diskUsagePercentage)
+    {
+        this.diskUsagePercentage = diskUsagePercentage;
         return this;
     }
 

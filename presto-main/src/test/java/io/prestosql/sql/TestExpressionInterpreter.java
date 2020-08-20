@@ -46,7 +46,6 @@ import io.prestosql.transaction.TestingTransactionManager;
 import io.prestosql.transaction.TransactionBuilder;
 import org.intellij.lang.annotations.Language;
 import org.joda.time.DateTime;
-import org.joda.time.DateTimeZone;
 import org.joda.time.LocalDate;
 import org.joda.time.LocalTime;
 import org.testng.annotations.Test;
@@ -55,12 +54,12 @@ import java.math.BigInteger;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.prestosql.SessionTestUtils.TEST_SESSION;
 import static io.prestosql.metadata.MetadataManager.createTestMetadataManager;
+import static io.prestosql.metadata.ResolvedFunction.extractFunctionName;
 import static io.prestosql.spi.type.BigintType.BIGINT;
 import static io.prestosql.spi.type.BooleanType.BOOLEAN;
 import static io.prestosql.spi.type.DateType.DATE;
@@ -74,7 +73,6 @@ import static io.prestosql.spi.type.VarcharType.VARCHAR;
 import static io.prestosql.spi.type.VarcharType.createVarcharType;
 import static io.prestosql.sql.ExpressionFormatter.formatExpression;
 import static io.prestosql.sql.ExpressionTestUtils.assertExpressionEquals;
-import static io.prestosql.sql.ExpressionTestUtils.getFunctionName;
 import static io.prestosql.sql.ExpressionTestUtils.getTypes;
 import static io.prestosql.sql.ExpressionTestUtils.resolveFunctionCalls;
 import static io.prestosql.sql.ExpressionUtils.rewriteIdentifiersToSymbolReferences;
@@ -82,9 +80,9 @@ import static io.prestosql.sql.ParsingUtil.createParsingOptions;
 import static io.prestosql.sql.planner.ExpressionInterpreter.expressionInterpreter;
 import static io.prestosql.sql.planner.ExpressionInterpreter.expressionOptimizer;
 import static io.prestosql.type.IntervalDayTimeType.INTERVAL_DAY_TIME;
-import static io.prestosql.util.DateTimeZoneIndex.getDateTimeZone;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
+import static org.joda.time.DateTimeZone.UTC;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertThrows;
 import static org.testng.Assert.assertTrue;
@@ -388,7 +386,7 @@ public class TestExpressionInterpreter
     @Test
     public void testExtract()
     {
-        DateTime dateTime = new DateTime(2001, 8, 22, 3, 4, 5, 321, getDateTimeZone(TEST_SESSION.getTimeZoneKey()));
+        DateTime dateTime = new DateTime(2001, 8, 22, 3, 4, 5, 321, UTC);
         double seconds = dateTime.getMillis() / 1000.0;
 
         assertOptimizedEquals("extract(YEAR FROM from_unixtime(" + seconds + "))", "2001");
@@ -408,10 +406,10 @@ public class TestExpressionInterpreter
         assertOptimizedEquals("extract(QUARTER FROM bound_timestamp)", "3");
         assertOptimizedEquals("extract(MONTH FROM bound_timestamp)", "8");
         assertOptimizedEquals("extract(WEEK FROM bound_timestamp)", "34");
-        assertOptimizedEquals("extract(DOW FROM bound_timestamp)", "2");
-        assertOptimizedEquals("extract(DOY FROM bound_timestamp)", "233");
-        assertOptimizedEquals("extract(DAY FROM bound_timestamp)", "21");
-        assertOptimizedEquals("extract(HOUR FROM bound_timestamp)", "16");
+        assertOptimizedEquals("extract(DOW FROM bound_timestamp)", "3");
+        assertOptimizedEquals("extract(DOY FROM bound_timestamp)", "234");
+        assertOptimizedEquals("extract(DAY FROM bound_timestamp)", "22");
+        assertOptimizedEquals("extract(HOUR FROM bound_timestamp)", "3");
         assertOptimizedEquals("extract(MINUTE FROM bound_timestamp)", "4");
         assertOptimizedEquals("extract(SECOND FROM bound_timestamp)", "5");
         // todo reenable when cast as timestamp with time zone is implemented
@@ -518,15 +516,6 @@ public class TestExpressionInterpreter
         assertEvaluatedEquals("map(ARRAY[1, 2], ARRAY[1, NULL]) IN (map(ARRAY[1, 2], ARRAY[2, NULL]))", "false");
         assertEvaluatedEquals("map(ARRAY[1, 2], ARRAY[1, NULL]) IN (map(ARRAY[1, 2], ARRAY[1, NULL]), map(ARRAY[1, 2], ARRAY[2, NULL]))", "NULL");
         assertEvaluatedEquals("map(ARRAY[1, 2], ARRAY[1, NULL]) IN (map(ARRAY[1, 2], ARRAY[1, NULL]), map(ARRAY[1, 2], ARRAY[2, NULL]), map(ARRAY[1, 2], ARRAY[1, NULL]))", "NULL");
-    }
-
-    @Test
-    public void testCurrentTimestamp()
-    {
-        double current = TEST_SESSION.getStart().toEpochMilli() / 1000.0;
-        assertOptimizedEquals("current_timestamp = from_unixtime(" + current + ")", "true");
-        double future = current + TimeUnit.MINUTES.toSeconds(1);
-        assertOptimizedEquals("current_timestamp > from_unixtime(" + future + ")", "false");
     }
 
     @Test
@@ -1440,7 +1429,7 @@ public class TestExpressionInterpreter
         assertEquals(evaluate(predicate), expected);
     }
 
-    private static StringLiteral rawStringLiteral(final Slice slice)
+    private static StringLiteral rawStringLiteral(Slice slice)
     {
         return new StringLiteral(slice.toStringUtf8())
         {
@@ -1492,15 +1481,15 @@ public class TestExpressionInterpreter
                 case "bound_double":
                     return 12.34;
                 case "bound_date":
-                    return new LocalDate(2001, 8, 22).toDateMidnight(DateTimeZone.UTC).getMillis();
+                    return new LocalDate(2001, 8, 22).toDateMidnight(UTC).getMillis();
                 case "bound_time":
-                    return new LocalTime(3, 4, 5, 321).toDateTime(new DateTime(0, DateTimeZone.UTC)).getMillis();
+                    return new LocalTime(3, 4, 5, 321).toDateTime(new DateTime(0, UTC)).getMillis();
                 case "bound_timestamp":
-                    return new DateTime(2001, 8, 22, 3, 4, 5, 321, DateTimeZone.UTC).getMillis();
+                    return new DateTime(2001, 8, 22, 3, 4, 5, 321, UTC).getMillis();
                 case "bound_pattern":
                     return utf8Slice("%el%");
                 case "bound_timestamp_with_timezone":
-                    return new SqlTimestampWithTimeZone(new DateTime(1970, 1, 1, 1, 0, 0, 999, DateTimeZone.UTC).getMillis(), getTimeZoneKey("Z"));
+                    return SqlTimestampWithTimeZone.newInstance(3, new DateTime(1970, 1, 1, 1, 0, 0, 999, UTC).getMillis(), 0, getTimeZoneKey("Z"));
                 case "bound_varbinary":
                     return Slices.wrappedBuffer((byte) 0xab);
                 case "bound_decimal_short":
@@ -1568,7 +1557,7 @@ public class TestExpressionInterpreter
         @Override
         public Expression rewriteFunctionCall(FunctionCall node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
         {
-            if (getFunctionName(node).equals(QualifiedName.of("fail"))) {
+            if (extractFunctionName(node.getName()).equals("fail")) {
                 return new FunctionCallBuilder(METADATA)
                         .setName(QualifiedName.of("fail"))
                         .addArgument(VARCHAR, new StringLiteral("fail"))

@@ -34,9 +34,11 @@ import io.prestosql.spi.connector.ConnectorSplitManager;
 import io.prestosql.spi.connector.ConnectorSplitSource;
 import io.prestosql.spi.connector.ConnectorTableHandle;
 import io.prestosql.spi.connector.ConnectorTransactionHandle;
+import io.prestosql.spi.connector.DynamicFilter;
 import io.prestosql.spi.connector.FixedSplitSource;
 import io.prestosql.spi.connector.SchemaTableName;
 import io.prestosql.spi.connector.TableNotFoundException;
+import io.prestosql.spi.type.TypeManager;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
 
@@ -69,6 +71,7 @@ import static io.prestosql.plugin.hive.TableToPartitionMapping.mapColumnsByIndex
 import static io.prestosql.plugin.hive.metastore.MetastoreUtil.getProtectMode;
 import static io.prestosql.plugin.hive.metastore.MetastoreUtil.makePartitionName;
 import static io.prestosql.plugin.hive.metastore.MetastoreUtil.verifyOnline;
+import static io.prestosql.plugin.hive.util.HiveCoercionPolicy.canCoerce;
 import static io.prestosql.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.prestosql.spi.StandardErrorCode.SERVER_SHUTTING_DOWN;
 import static io.prestosql.spi.connector.ConnectorSplitManager.SplitSchedulingStrategy.GROUPED_SCHEDULING;
@@ -89,7 +92,6 @@ public class HiveSplitManager
     private final HdfsEnvironment hdfsEnvironment;
     private final DirectoryLister directoryLister;
     private final Executor executor;
-    private final CoercionPolicy coercionPolicy;
     private final int maxOutstandingSplits;
     private final DataSize maxOutstandingSplitsSize;
     private final int minPartitionBatchSize;
@@ -99,6 +101,7 @@ public class HiveSplitManager
     private final int maxSplitsPerSecond;
     private final boolean recursiveDfsWalkerEnabled;
     private final CounterStat highMemorySplitSourceCounter;
+    private final TypeManager typeManager;
 
     @Inject
     public HiveSplitManager(
@@ -110,7 +113,7 @@ public class HiveSplitManager
             DirectoryLister directoryLister,
             ExecutorService executorService,
             VersionEmbedder versionEmbedder,
-            CoercionPolicy coercionPolicy)
+            TypeManager typeManager)
     {
         this(
                 metastoreProvider,
@@ -119,7 +122,6 @@ public class HiveSplitManager
                 hdfsEnvironment,
                 directoryLister,
                 versionEmbedder.embedVersion(new BoundedExecutor(executorService, hiveConfig.getMaxSplitIteratorThreads())),
-                coercionPolicy,
                 new CounterStat(),
                 hiveConfig.getMaxOutstandingSplits(),
                 hiveConfig.getMaxOutstandingSplitsSize(),
@@ -128,7 +130,8 @@ public class HiveSplitManager
                 hiveConfig.getMaxInitialSplits(),
                 hiveConfig.getSplitLoaderConcurrency(),
                 hiveConfig.getMaxSplitsPerSecond(),
-                hiveConfig.getRecursiveDirWalkerEnabled());
+                hiveConfig.getRecursiveDirWalkerEnabled(),
+                typeManager);
     }
 
     public HiveSplitManager(
@@ -138,7 +141,6 @@ public class HiveSplitManager
             HdfsEnvironment hdfsEnvironment,
             DirectoryLister directoryLister,
             Executor executor,
-            CoercionPolicy coercionPolicy,
             CounterStat highMemorySplitSourceCounter,
             int maxOutstandingSplits,
             DataSize maxOutstandingSplitsSize,
@@ -147,7 +149,8 @@ public class HiveSplitManager
             int maxInitialSplits,
             int splitLoaderConcurrency,
             @Nullable Integer maxSplitsPerSecond,
-            boolean recursiveDfsWalkerEnabled)
+            boolean recursiveDfsWalkerEnabled,
+            TypeManager typeManager)
     {
         this.metastoreProvider = requireNonNull(metastoreProvider, "metastore is null");
         this.partitionManager = requireNonNull(partitionManager, "partitionManager is null");
@@ -155,7 +158,6 @@ public class HiveSplitManager
         this.hdfsEnvironment = requireNonNull(hdfsEnvironment, "hdfsEnvironment is null");
         this.directoryLister = requireNonNull(directoryLister, "directoryLister is null");
         this.executor = new ErrorCodedExecutor(executor);
-        this.coercionPolicy = requireNonNull(coercionPolicy, "coercionPolicy is null");
         this.highMemorySplitSourceCounter = requireNonNull(highMemorySplitSourceCounter, "highMemorySplitSourceCounter is null");
         checkArgument(maxOutstandingSplits >= 1, "maxOutstandingSplits must be at least 1");
         this.maxOutstandingSplits = maxOutstandingSplits;
@@ -166,6 +168,7 @@ public class HiveSplitManager
         this.splitLoaderConcurrency = splitLoaderConcurrency;
         this.maxSplitsPerSecond = firstNonNull(maxSplitsPerSecond, Integer.MAX_VALUE);
         this.recursiveDfsWalkerEnabled = recursiveDfsWalkerEnabled;
+        this.typeManager = requireNonNull(typeManager, "typeManager is null");
     }
 
     @Override
@@ -173,7 +176,8 @@ public class HiveSplitManager
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
             ConnectorTableHandle tableHandle,
-            SplitSchedulingStrategy splitSchedulingStrategy)
+            SplitSchedulingStrategy splitSchedulingStrategy,
+            DynamicFilter dynamicFilter)
     {
         HiveTableHandle hiveTable = (HiveTableHandle) tableHandle;
         SchemaTableName tableName = hiveTable.getSchemaTableName();
@@ -215,6 +219,8 @@ public class HiveSplitManager
                 table,
                 hivePartitions,
                 hiveTable.getCompactEffectivePredicate(),
+                dynamicFilter::getCurrentPredicate,
+                typeManager,
                 createBucketSplitInfo(bucketHandle, bucketFilter),
                 session,
                 hdfsEnvironment,
@@ -240,7 +246,7 @@ public class HiveSplitManager
                         maxSplitsPerSecond,
                         hiveSplitLoader,
                         executor,
-                        new CounterStat());
+                        highMemorySplitSourceCounter);
                 break;
             case GROUPED_SCHEDULING:
                 splitSource = HiveSplitSource.bucketed(
@@ -253,7 +259,7 @@ public class HiveSplitManager
                         maxSplitsPerSecond,
                         hiveSplitLoader,
                         executor,
-                        new CounterStat());
+                        highMemorySplitSourceCounter);
                 break;
             default:
                 throw new IllegalArgumentException("Unknown splitSchedulingStrategy: " + splitSchedulingStrategy);
@@ -373,7 +379,7 @@ public class HiveSplitManager
             HiveType tableType = tableColumns.get(i).getType();
             HiveType partitionType = partitionColumns.get(i).getType();
             if (!tableType.equals(partitionType)) {
-                if (!coercionPolicy.canCoerce(partitionType, tableType)) {
+                if (!canCoerce(typeManager, partitionType, tableType)) {
                     throw tablePartitionColumnMismatchException(tableName, partName, tableColumns.get(i).getName(), tableType, partitionColumns.get(i).getName(), partitionType);
                 }
                 columnCoercions.put(i, partitionType.getHiveTypeName());
@@ -403,7 +409,7 @@ public class HiveSplitManager
             Column partitionColumn = partitionColumns.get(partitionColumnIndex);
             HiveType partitionType = partitionColumn.getType();
             if (!tableType.equals(partitionType)) {
-                if (!coercionPolicy.canCoerce(partitionType, tableType)) {
+                if (!canCoerce(typeManager, partitionType, tableType)) {
                     throw tablePartitionColumnMismatchException(tableName, partName, tableColumn.getName(), tableType, partitionColumn.getName(), partitionType);
                 }
                 columnCoercions.put(partitionColumnIndex, partitionType.getHiveTypeName());
@@ -446,7 +452,7 @@ public class HiveSplitManager
      */
     private static <T> Iterable<List<T>> partitionExponentially(List<T> values, int minBatchSize, int maxBatchSize)
     {
-        return () -> new AbstractIterator<List<T>>()
+        return () -> new AbstractIterator<>()
         {
             private int currentSize = minBatchSize;
             private final Iterator<T> iterator = values.iterator();

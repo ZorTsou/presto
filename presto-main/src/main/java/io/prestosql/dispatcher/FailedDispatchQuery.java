@@ -91,6 +91,12 @@ public class FailedDispatchQuery
     }
 
     @Override
+    public QueryState getState()
+    {
+        return fullQueryInfo.getState();
+    }
+
+    @Override
     public Session getSession()
     {
         return session;
@@ -229,7 +235,8 @@ public class FailedDispatchQuery
                 ImmutableList.of(),
                 ImmutableList.of(),
                 true,
-                resourceGroupId);
+                resourceGroupId,
+                Optional.empty());
 
         return queryInfo;
     }
@@ -259,6 +266,7 @@ public class FailedDispatchQuery
                 0,
                 0,
                 0,
+                DataSize.ofBytes(0),
                 DataSize.ofBytes(0),
                 DataSize.ofBytes(0),
                 DataSize.ofBytes(0),

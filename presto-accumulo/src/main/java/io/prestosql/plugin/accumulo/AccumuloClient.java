@@ -40,6 +40,7 @@ import io.prestosql.spi.connector.SchemaTableName;
 import io.prestosql.spi.connector.TableNotFoundException;
 import io.prestosql.spi.predicate.Domain;
 import io.prestosql.spi.predicate.Marker.Bound;
+import io.prestosql.spi.type.TimestampType;
 import org.apache.accumulo.core.client.AccumuloException;
 import org.apache.accumulo.core.client.AccumuloSecurityException;
 import org.apache.accumulo.core.client.Connector;
@@ -181,6 +182,10 @@ public class AccumuloClient
                         || Types.isArrayType(Types.getValueType(column.getType()))) {
                     throw new PrestoException(INVALID_TABLE_PROPERTY, "Key/value types of a MAP column must be plain types");
                 }
+            }
+
+            if (column.getType() instanceof TimestampType && ((TimestampType) column.getType()).getPrecision() != 3) {
+                throw new PrestoException(NOT_SUPPORTED, format("%s type not supported", column.getType()));
             }
 
             columnNameBuilder.add(column.getName().toLowerCase(Locale.ENGLISH));
@@ -568,7 +573,7 @@ public class AccumuloClient
 
     public void renameColumn(AccumuloTable table, String source, String target)
     {
-        if (!table.getColumns().stream().anyMatch(columnHandle -> columnHandle.getName().equalsIgnoreCase(source))) {
+        if (table.getColumns().stream().noneMatch(columnHandle -> columnHandle.getName().equalsIgnoreCase(source))) {
             throw new PrestoException(NOT_FOUND, format("Failed to find source column %s to rename to %s", source, target));
         }
 

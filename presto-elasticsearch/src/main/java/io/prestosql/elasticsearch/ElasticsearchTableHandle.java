@@ -127,4 +127,23 @@ public final class ElasticsearchTableHandle
     {
         return Objects.hash(type, schema, index, constraint, query, limit);
     }
+
+    @Override
+    public String toString()
+    {
+        StringBuilder builder = new StringBuilder();
+        builder.append(type + ":" + index);
+
+        StringBuilder attributes = new StringBuilder();
+        limit.ifPresent(value -> attributes.append("limit=" + value));
+        query.ifPresent(value -> attributes.append("query" + value));
+
+        if (attributes.length() > 0) {
+            builder.append("(");
+            builder.append(attributes);
+            builder.append(")");
+        }
+
+        return builder.toString();
+    }
 }

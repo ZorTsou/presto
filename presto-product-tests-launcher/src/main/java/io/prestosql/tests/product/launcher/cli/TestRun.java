@@ -30,22 +30,30 @@ import io.prestosql.tests.product.launcher.env.EnvironmentFactory;
 import io.prestosql.tests.product.launcher.env.EnvironmentModule;
 import io.prestosql.tests.product.launcher.env.EnvironmentOptions;
 import io.prestosql.tests.product.launcher.env.Environments;
+import net.jodah.failsafe.Failsafe;
+import net.jodah.failsafe.RetryPolicy;
+import org.testcontainers.containers.BindMode;
 import org.testcontainers.containers.Container;
+import org.testcontainers.containers.wait.strategy.LogMessageWaitStrategy;
 
 import javax.inject.Inject;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.net.Socket;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Strings.isNullOrEmpty;
 import static io.prestosql.tests.product.launcher.cli.Commands.runCommand;
 import static io.prestosql.tests.product.launcher.docker.ContainerUtil.exposePort;
 import static io.prestosql.tests.product.launcher.env.common.Standard.CONTAINER_TEMPTO_PROFILE_CONFIG;
 import static java.util.Objects.requireNonNull;
+import static java.util.UUID.randomUUID;
 import static org.testcontainers.containers.BindMode.READ_ONLY;
 
 @Command(name = "run", description = "Presto product test launcher")
@@ -88,6 +96,12 @@ public final class TestRun
         @Option(name = "--environment", title = "environment", description = "the name of the environment to start", required = true)
         public String environment;
 
+        @Option(name = "--reports-dir", title = "reports dir", description = "location of the reports directory")
+        public Path reportsDirBase = Paths.get("presto-product-tests/target/reports/");
+
+        @Option(name = "--startup-retries", title = "environment startup retries", description = "environment startup retries")
+        public int startupRetries = 5;
+
         @Arguments(description = "test arguments")
         public List<String> testArguments = new ArrayList<>();
 
@@ -102,14 +116,15 @@ public final class TestRun
     public static class Execution
             implements Runnable
     {
-        private static final int TESTS_READY_PORT = 1970;
-
+        private static final String CONTAINER_REPORTS_DIR = "/docker/test-reports";
         private final EnvironmentFactory environmentFactory;
         private final PathResolver pathResolver;
         private final boolean debug;
         private final File testJar;
         private final List<String> testArguments;
         private final String environment;
+        private final int startupRetries;
+        private final Path reportsDirBase;
 
         @Inject
         public Execution(EnvironmentFactory environmentFactory, PathResolver pathResolver, EnvironmentOptions environmentOptions, TestRunOptions testRunOptions)
@@ -121,28 +136,42 @@ public final class TestRun
             this.testJar = requireNonNull(testRunOptions.testJar, "testOptions.testJar is null");
             this.testArguments = ImmutableList.copyOf(requireNonNull(testRunOptions.testArguments, "testOptions.testArguments is null"));
             this.environment = requireNonNull(testRunOptions.environment, "testRunOptions.environment is null");
+            this.startupRetries = testRunOptions.startupRetries;
+            this.reportsDirBase = buildFinalReportsDir(requireNonNull(testRunOptions.reportsDirBase, "testRunOptions.reportsDirBase is empty"), testRunOptions.environment);
         }
 
         @Override
         public void run()
         {
+            RetryPolicy<Object> retryPolicy = new RetryPolicy<>()
+                    .withMaxRetries(startupRetries)
+                    .onFailedAttempt(event -> log.warn("Could not start environment '%s': %s", environment, event.getLastFailure()))
+                    .onRetry(event -> log.info("Trying to start environment '%s', %d failed attempt(s)", environment, event.getAttemptCount() + 1))
+                    .onSuccess(event -> log.info("Environment '%s' started in %s, %d attempt(s)", environment, event.getElapsedTime(), event.getAttemptCount()));
+
             try (UncheckedCloseable ignore = this::cleanUp) {
-                log.info("Pruning old environment(s)");
-                Environments.pruneEnvironment();
+                Environment environment = Failsafe.with(retryPolicy)
+                        .get(() -> tryStartEnvironment());
 
-                Environment environment = getEnvironment();
-
-                log.info("Starting the environment '%s'", environment);
-                environment.start();
-                log.info("Environment '%s' started", environment);
-
-                runTests(environment);
+                awaitTestsCompletion(environment);
             }
             catch (Throwable e) {
                 // log failure (tersely) because cleanup may take some time
                 log.error("Failure: %s", e);
                 throw e;
             }
+        }
+
+        private Environment tryStartEnvironment()
+        {
+            log.info("Pruning old environment(s)");
+            Environments.pruneEnvironment();
+
+            Environment environment = getEnvironment();
+            log.info("Starting the environment '%s'", environment);
+            environment.start();
+
+            return environment;
         }
 
         private void cleanUp()
@@ -153,11 +182,11 @@ public final class TestRun
 
         private Environment getEnvironment()
         {
-            Environment.Builder environment = environmentFactory.get(this.environment);
+            Environment.Builder environment = environmentFactory.get(this.environment)
+                    .containerDependsOnRest("tests");
 
+            environment.configureContainer("tests", this::mountReportsDir);
             environment.configureContainer("tests", container -> {
-                container.addExposedPort(TESTS_READY_PORT);
-
                 List<String> temptoJavaOptions = Splitter.on(" ").omitEmptyStrings().splitToList(
                         container.getEnvMap().getOrDefault("TEMPTO_JAVA_OPTS", ""));
 
@@ -168,12 +197,9 @@ public final class TestRun
                 }
 
                 container
+                        // the test jar is hundreds MB and file system bind is much more efficient
                         .withFileSystemBind(pathResolver.resolvePlaceholders(testJar).getPath(), "/docker/test.jar", READ_ONLY)
-                        .withEnv("TESTS_HIVE_VERSION_MAJOR", System.getenv().getOrDefault("TESTS_HIVE_VERSION_MAJOR", "1"))
-                        .withEnv("TESTS_HIVE_VERSION_MINOR", System.getenv().getOrDefault("TESTS_HIVE_VERSION_MINOR", "2"))
                         .withCommand(ImmutableList.<String>builder()
-                                .add("bash", "-xeuc", "nc -l \"$1\" < /dev/null; shift; exec \"$@\"", "-")
-                                .add(Integer.toString(TESTS_READY_PORT))
                                 .add(
                                         "/usr/lib/jvm/zulu-11/bin/java",
                                         "-Xmx1g",
@@ -194,23 +220,47 @@ public final class TestRun
                                                 .add(container.getEnvMap().getOrDefault("TEMPTO_CONFIG_FILES", "/dev/null"))
                                                 .build()))
                                 .addAll(testArguments)
-                                .build().toArray(new String[0]));
+                                .addAll(reportsDirOptions(reportsDirBase))
+                                .build().toArray(new String[0]))
+                        // this message marks that environment has started and tests are running
+                        .waitingFor(new LogMessageWaitStrategy().withRegEx(".*\\[TestNG] Running.*"));
             });
 
             return environment.build();
         }
 
-        private void runTests(Environment environment)
+        private static Iterable<? extends String> reportsDirOptions(Path path)
         {
-            log.info("Starting test execution");
+            if (isNullOrEmpty(path.toString())) {
+                return ImmutableList.of();
+            }
+
+            return ImmutableList.of("--report-dir", CONTAINER_REPORTS_DIR);
+        }
+
+        private void mountReportsDir(Container container)
+        {
+            if (isNullOrEmpty(reportsDirBase.toString())) {
+                return;
+            }
+
+            if (!Files.exists(reportsDirBase)) {
+                try {
+                    Files.createDirectories(reportsDirBase);
+                    log.info("Created reports dir %s", reportsDirBase);
+                }
+                catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            }
+
+            container.withFileSystemBind(reportsDirBase.toAbsolutePath().toString(), CONTAINER_REPORTS_DIR, BindMode.READ_WRITE);
+            log.info("Bound host %s into container's %s report dir", reportsDirBase, CONTAINER_REPORTS_DIR);
+        }
+
+        private void awaitTestsCompletion(Environment environment)
+        {
             Container<?> container = environment.getContainer("tests");
-            try {
-                // Release waiter to let the tests run
-                new Socket(container.getContainerIpAddress(), container.getMappedPort(TESTS_READY_PORT)).close();
-            }
-            catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
 
             log.info("Waiting for test completion");
             try {
@@ -220,10 +270,10 @@ public final class TestRun
 
                 InspectContainerResponse containerInfo = container.getCurrentContainerInfo();
                 ContainerState containerState = containerInfo.getState();
-                Integer exitCode = containerState.getExitCode();
+                Long exitCode = containerState.getExitCodeLong();
                 log.info("Test container %s is %s, with exitCode %s", containerInfo.getId(), containerState.getStatus(), exitCode);
                 checkState(exitCode != null, "No exitCode for tests container %s in state %s", container, containerState);
-                if (exitCode != 0) {
+                if (exitCode != 0L) {
                     throw new RuntimeException("Tests exited with " + exitCode);
                 }
             }
@@ -231,6 +281,13 @@ public final class TestRun
                 Thread.currentThread().interrupt();
                 throw new RuntimeException("Interrupted", e);
             }
+        }
+
+        private static Path buildFinalReportsDir(Path reportsDirBase, String environment)
+        {
+            return reportsDirBase
+                    .resolve(environment)
+                    .resolve(randomUUID().toString().replace("-", ""));
         }
     }
 

@@ -22,6 +22,7 @@ import com.google.common.collect.Lists;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.airlift.units.DataSize;
+import io.prestosql.parquet.writer.ParquetSchemaConverter;
 import io.prestosql.parquet.writer.ParquetWriter;
 import io.prestosql.parquet.writer.ParquetWriterOptions;
 import io.prestosql.plugin.hive.HiveConfig;
@@ -34,7 +35,6 @@ import io.prestosql.plugin.hive.parquet.write.MapKeyValuesSchemaConverter;
 import io.prestosql.plugin.hive.parquet.write.SingleLevelArrayMapKeyValuesSchemaConverter;
 import io.prestosql.plugin.hive.parquet.write.SingleLevelArraySchemaConverter;
 import io.prestosql.plugin.hive.parquet.write.TestMapredParquetOutputFormat;
-import io.prestosql.plugin.hive.rubix.RubixEnabledConfig;
 import io.prestosql.spi.Page;
 import io.prestosql.spi.PageBuilder;
 import io.prestosql.spi.block.Block;
@@ -70,7 +70,6 @@ import org.apache.hadoop.mapred.JobConf;
 import org.apache.parquet.column.ParquetProperties.WriterVersion;
 import org.apache.parquet.hadoop.metadata.CompressionCodecName;
 import org.apache.parquet.schema.MessageType;
-import org.joda.time.DateTimeZone;
 
 import java.io.Closeable;
 import java.io.File;
@@ -112,7 +111,6 @@ import static io.prestosql.spi.type.DoubleType.DOUBLE;
 import static io.prestosql.spi.type.IntegerType.INTEGER;
 import static io.prestosql.spi.type.RealType.REAL;
 import static io.prestosql.spi.type.SmallintType.SMALLINT;
-import static io.prestosql.spi.type.TimeZoneKey.UTC_KEY;
 import static io.prestosql.spi.type.TimestampType.TIMESTAMP;
 import static io.prestosql.spi.type.TinyintType.TINYINT;
 import static io.prestosql.spi.type.VarbinaryType.VARBINARY;
@@ -140,8 +138,6 @@ import static org.testng.Assert.assertTrue;
 
 public class ParquetTester
 {
-    public static final DateTimeZone HIVE_STORAGE_TIME_ZONE = DateTimeZone.forID("America/Bahia_Banderas");
-
     private static final int MAX_PRECISION_INT64 = toIntExact(maxPrecision(8));
 
     private static final boolean OPTIMIZED = true;
@@ -391,7 +387,6 @@ public class ParquetTester
                 new HiveConfig()
                         .setHiveStorageFormat(HiveStorageFormat.PARQUET)
                         .setUseParquetColumnNames(false),
-                new RubixEnabledConfig(),
                 new OrcReaderConfig(),
                 new OrcWriterConfig(),
                 new ParquetReaderConfig()
@@ -531,7 +526,7 @@ public class ParquetTester
             return new SqlDate(((Long) fieldFromCursor).intValue());
         }
         if (TIMESTAMP.equals(type)) {
-            return new SqlTimestamp((long) fieldFromCursor, UTC_KEY);
+            return SqlTimestamp.fromMillis(3, (long) fieldFromCursor);
         }
         return fieldFromCursor;
     }
@@ -678,7 +673,7 @@ public class ParquetTester
 
     static <T> Iterable<T> insertNullEvery(int n, Iterable<T> iterable)
     {
-        return () -> new AbstractIterator<T>()
+        return () -> new AbstractIterator<>()
         {
             private final Iterator<T> delegate = iterable.iterator();
             private int position;
@@ -714,11 +709,15 @@ public class ParquetTester
             throws Exception
     {
         checkArgument(types.size() == columnNames.size() && types.size() == values.length);
+        ParquetSchemaConverter schemaConverter = new ParquetSchemaConverter(types, columnNames);
         ParquetWriter writer = new ParquetWriter(
                 new FileOutputStream(outputFile),
-                columnNames,
-                types,
-                ParquetWriterOptions.builder().build(),
+                schemaConverter.getMessageType(),
+                schemaConverter.getPrimitiveTypes(),
+                ParquetWriterOptions.builder()
+                        .setMaxPageSize(DataSize.ofBytes(100))
+                        .setMaxBlockSize(DataSize.ofBytes(100000))
+                        .build(),
                 compressionCodecName);
 
         PageBuilder pageBuilder = new PageBuilder(types);
@@ -784,7 +783,7 @@ public class ParquetTester
                 type.writeLong(blockBuilder, days);
             }
             else if (TIMESTAMP.equals(type)) {
-                long millis = ((SqlTimestamp) value).getMillisUtc();
+                long millis = ((SqlTimestamp) value).getMillis();
                 type.writeLong(blockBuilder, millis);
             }
             else {

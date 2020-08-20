@@ -13,7 +13,6 @@
  */
 package io.prestosql.sql.planner.assertions;
 
-import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
@@ -494,14 +493,19 @@ public final class PlanMatchPattern
 
     public static PlanMatchPattern spatialJoin(String expectedFilter, Optional<String> kdbTree, PlanMatchPattern left, PlanMatchPattern right)
     {
+        return spatialJoin(expectedFilter, kdbTree, Optional.empty(), left, right);
+    }
+
+    public static PlanMatchPattern spatialJoin(String expectedFilter, Optional<String> kdbTree, Optional<List<String>> outputSymbols, PlanMatchPattern left, PlanMatchPattern right)
+    {
         return node(SpatialJoinNode.class, left, right).with(
-                new SpatialJoinMatcher(SpatialJoinNode.Type.INNER, rewriteIdentifiersToSymbolReferences(new SqlParser().createExpression(expectedFilter, new ParsingOptions())), kdbTree));
+                new SpatialJoinMatcher(SpatialJoinNode.Type.INNER, rewriteIdentifiersToSymbolReferences(new SqlParser().createExpression(expectedFilter, new ParsingOptions())), kdbTree, outputSymbols));
     }
 
     public static PlanMatchPattern spatialLeftJoin(String expectedFilter, PlanMatchPattern left, PlanMatchPattern right)
     {
         return node(SpatialJoinNode.class, left, right).with(
-                new SpatialJoinMatcher(SpatialJoinNode.Type.LEFT, rewriteIdentifiersToSymbolReferences(new SqlParser().createExpression(expectedFilter, new ParsingOptions())), Optional.empty()));
+                new SpatialJoinMatcher(SpatialJoinNode.Type.LEFT, rewriteIdentifiersToSymbolReferences(new SqlParser().createExpression(expectedFilter, new ParsingOptions())), Optional.empty(), Optional.empty()));
     }
 
     public static PlanMatchPattern unnest(PlanMatchPattern source)
@@ -979,9 +983,7 @@ public final class PlanMatchPattern
                 .map(PlanNodeMatcher.class::cast)
                 .findFirst();
 
-        if (planNodeMatcher.isPresent()) {
-            builder.append("(").append(planNodeMatcher.get().getNodeClass().getSimpleName()).append(")");
-        }
+        planNodeMatcher.ifPresent(nodeMatcher -> builder.append("(").append(nodeMatcher.getNodeClass().getSimpleName()).append(")"));
 
         builder.append("\n");
 
@@ -1000,7 +1002,7 @@ public final class PlanMatchPattern
 
     private static String indentString(int indent)
     {
-        return Strings.repeat("    ", indent);
+        return "    ".repeat(indent);
     }
 
     public static GroupingSetDescriptor globalAggregation()

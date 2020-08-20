@@ -17,14 +17,12 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import io.prestosql.Session;
-import io.prestosql.SystemSessionProperties;
 import io.prestosql.metadata.Metadata;
 import io.prestosql.metadata.ResolvedFunction;
 import io.prestosql.spi.type.DecimalParseResult;
 import io.prestosql.spi.type.Decimals;
 import io.prestosql.spi.type.RowType;
 import io.prestosql.spi.type.RowType.Field;
-import io.prestosql.spi.type.TimeZoneKey;
 import io.prestosql.spi.type.TimestampType;
 import io.prestosql.spi.type.TimestampWithTimeZoneType;
 import io.prestosql.spi.type.Type;
@@ -75,7 +73,6 @@ import io.prestosql.sql.tree.TimeLiteral;
 import io.prestosql.sql.tree.TimestampLiteral;
 import io.prestosql.sql.tree.WhenClause;
 import io.prestosql.type.UnknownType;
-import io.prestosql.util.DateTimeUtils;
 
 import java.util.List;
 import java.util.Map;
@@ -85,6 +82,10 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.slice.SliceUtf8.countCodePoints;
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.prestosql.spi.function.OperatorType.EQUAL;
+import static io.prestosql.spi.function.OperatorType.HASH_CODE;
+import static io.prestosql.spi.function.OperatorType.INDETERMINATE;
+import static io.prestosql.spi.function.OperatorType.LESS_THAN_OR_EQUAL;
 import static io.prestosql.spi.function.OperatorType.NEGATION;
 import static io.prestosql.spi.function.OperatorType.SUBSCRIPT;
 import static io.prestosql.spi.type.BigintType.BIGINT;
@@ -114,13 +115,12 @@ import static io.prestosql.sql.relational.SpecialForm.Form.OR;
 import static io.prestosql.sql.relational.SpecialForm.Form.ROW_CONSTRUCTOR;
 import static io.prestosql.sql.relational.SpecialForm.Form.SWITCH;
 import static io.prestosql.sql.relational.SpecialForm.Form.WHEN;
+import static io.prestosql.type.DateTimes.parseTime;
+import static io.prestosql.type.DateTimes.parseTimestamp;
+import static io.prestosql.type.DateTimes.parseTimestampWithTimeZone;
 import static io.prestosql.type.JsonType.JSON;
 import static io.prestosql.util.DateTimeUtils.parseDayTimeInterval;
-import static io.prestosql.util.DateTimeUtils.parseLegacyTimestamp;
 import static io.prestosql.util.DateTimeUtils.parseTimeWithTimeZone;
-import static io.prestosql.util.DateTimeUtils.parseTimeWithoutTimeZone;
-import static io.prestosql.util.DateTimeUtils.parseTimestamp;
-import static io.prestosql.util.DateTimeUtils.parseTimestampWithTimeZone;
 import static io.prestosql.util.DateTimeUtils.parseYearMonthInterval;
 import static java.util.Objects.requireNonNull;
 
@@ -136,12 +136,7 @@ public final class SqlToRowExpressionTranslator
             Session session,
             boolean optimize)
     {
-        Visitor visitor = new Visitor(
-                metadata,
-                types,
-                layout,
-                session.getTimeZoneKey(),
-                SystemSessionProperties.isLegacyTimestamp(session));
+        Visitor visitor = new Visitor(metadata, types, layout);
         RowExpression result = visitor.process(expression, null);
 
         requireNonNull(result, "translated expression is null");
@@ -160,22 +155,16 @@ public final class SqlToRowExpressionTranslator
         private final Metadata metadata;
         private final Map<NodeRef<Expression>, Type> types;
         private final Map<Symbol, Integer> layout;
-        private final TimeZoneKey timeZoneKey;
-        private final boolean isLegacyTimestamp;
         private final StandardFunctionResolution standardFunctionResolution;
 
         private Visitor(
                 Metadata metadata,
                 Map<NodeRef<Expression>, Type> types,
-                Map<Symbol, Integer> layout,
-                TimeZoneKey timeZoneKey,
-                boolean isLegacyTimestamp)
+                Map<Symbol, Integer> layout)
         {
             this.metadata = metadata;
             this.types = ImmutableMap.copyOf(requireNonNull(types, "types is null"));
             this.layout = layout;
-            this.timeZoneKey = timeZoneKey;
-            this.isLegacyTimestamp = isLegacyTimestamp;
             standardFunctionResolution = new StandardFunctionResolution(metadata);
         }
 
@@ -256,13 +245,11 @@ public final class SqlToRowExpressionTranslator
             if (JSON.equals(type)) {
                 return call(
                         metadata.resolveFunction(QualifiedName.of("json_parse"), fromTypes(VARCHAR)),
-                        type,
                         constant(utf8Slice(node.getValue()), VARCHAR));
             }
 
             return call(
                     metadata.getCoercion(VARCHAR, type),
-                    type,
                     constant(utf8Slice(node.getValue()), VARCHAR));
         }
 
@@ -274,13 +261,7 @@ public final class SqlToRowExpressionTranslator
                 value = parseTimeWithTimeZone(node.getValue());
             }
             else {
-                if (isLegacyTimestamp) {
-                    // parse in time zone of client
-                    value = DateTimeUtils.parseLegacyTime(timeZoneKey, node.getValue());
-                }
-                else {
-                    value = parseTimeWithoutTimeZone(node.getValue());
-                }
+                value = parseTime(node.getValue());
             }
             return constant(value, getType(node));
         }
@@ -290,17 +271,14 @@ public final class SqlToRowExpressionTranslator
         {
             Type type = getType(node);
 
-            long value;
+            Object value;
             if (type instanceof TimestampType) {
-                if (isLegacyTimestamp) {
-                    value = parseLegacyTimestamp(timeZoneKey, node.getValue());
-                }
-                else {
-                    value = parseTimestamp(node.getValue());
-                }
+                int precision = ((TimestampType) type).getPrecision();
+                value = parseTimestamp(precision, node.getValue());
             }
             else if (type instanceof TimestampWithTimeZoneType) {
-                value = parseTimestampWithTimeZone(node.getValue());
+                int precision = ((TimestampWithTimeZoneType) type).getPrecision();
+                value = parseTimestampWithTimeZone(precision, node.getValue());
             }
             else {
                 throw new IllegalStateException("Unexpected type: " + type);
@@ -330,7 +308,6 @@ public final class SqlToRowExpressionTranslator
 
             return call(
                     standardFunctionResolution.comparisonFunction(node.getOperator(), left.getType(), right.getType()),
-                    BOOLEAN,
                     left,
                     right);
         }
@@ -342,10 +319,7 @@ public final class SqlToRowExpressionTranslator
                     .map(value -> process(value, context))
                     .collect(toImmutableList());
 
-            ResolvedFunction resolvedFunction = ResolvedFunction.fromQualifiedName(node.getName())
-                    .orElseThrow(() -> new IllegalArgumentException("function call has not been resolved: " + node));
-
-            return new CallExpression(resolvedFunction, getType(node), arguments);
+            return new CallExpression(metadata.decodeFunction(node.getName()), arguments);
         }
 
         @Override
@@ -399,7 +373,6 @@ public final class SqlToRowExpressionTranslator
 
             return call(
                     standardFunctionResolution.arithmeticFunction(node.getOperator(), left.getType(), right.getType()),
-                    getType(node),
                     left,
                     right);
         }
@@ -415,7 +388,6 @@ public final class SqlToRowExpressionTranslator
                 case MINUS:
                     return call(
                             metadata.resolveOperator(NEGATION, ImmutableList.of(expression.getType())),
-                            getType(node),
                             expression);
             }
 
@@ -456,13 +428,11 @@ public final class SqlToRowExpressionTranslator
             if (node.isSafe()) {
                 return call(
                         metadata.getCoercion(QualifiedName.of("TRY_CAST"), value.getType(), returnType),
-                        returnType,
                         value);
             }
 
             return call(
                     metadata.getCoercion(value.getType(), returnType),
-                    returnType,
                     value);
         }
 
@@ -485,7 +455,7 @@ public final class SqlToRowExpressionTranslator
             @Override
             public RowExpression visitCall(CallExpression call, Void context)
             {
-                return new CallExpression(call.getResolvedFunction(), targetType, call.getArguments());
+                return new CallExpression(call.getResolvedFunction(), call.getArguments());
             }
 
             @Override
@@ -534,22 +504,30 @@ public final class SqlToRowExpressionTranslator
         {
             ImmutableList.Builder<RowExpression> arguments = ImmutableList.builder();
 
-            arguments.add(process(node.getOperand(), context));
+            RowExpression value = process(node.getOperand(), context);
+            arguments.add(value);
 
+            ImmutableList.Builder<ResolvedFunction> functionDependencies = ImmutableList.builder();
             for (WhenClause clause : node.getWhenClauses()) {
-                arguments.add(new SpecialForm(WHEN,
+                RowExpression operand = process(clause.getOperand(), context);
+                RowExpression result = process(clause.getResult(), context);
+
+                functionDependencies.add(metadata.resolveOperator(EQUAL, ImmutableList.of(value.getType(), operand.getType())));
+
+                arguments.add(new SpecialForm(
+                        WHEN,
                         getType(clause),
-                        process(clause.getOperand(), context),
-                        process(clause.getResult(), context)));
+                        operand,
+                        result));
             }
 
             Type returnType = getType(node);
 
             arguments.add(node.getDefaultValue()
-                    .map((value) -> process(value, context))
+                    .map(defaultValue -> process(defaultValue, context))
                     .orElse(constantNull(returnType)));
 
-            return new SpecialForm(SWITCH, returnType, arguments.build());
+            return new SpecialForm(SWITCH, returnType, arguments.build(), functionDependencies.build());
         }
 
         @Override
@@ -633,13 +611,20 @@ public final class SqlToRowExpressionTranslator
         protected RowExpression visitInPredicate(InPredicate node, Void context)
         {
             ImmutableList.Builder<RowExpression> arguments = ImmutableList.builder();
-            arguments.add(process(node.getValue(), context));
+            RowExpression value = process(node.getValue(), context);
+            arguments.add(value);
             InListExpression values = (InListExpression) node.getValueList();
-            for (Expression value : values.getValues()) {
-                arguments.add(process(value, context));
+            for (Expression testValue : values.getValues()) {
+                arguments.add(process(testValue, context));
             }
 
-            return new SpecialForm(IN, BOOLEAN, arguments.build());
+            List<ResolvedFunction> functionDependencies = ImmutableList.<ResolvedFunction>builder()
+                    .add(metadata.resolveOperator(EQUAL, ImmutableList.of(value.getType(), value.getType())))
+                    .add(metadata.resolveOperator(HASH_CODE, ImmutableList.of(value.getType())))
+                    .add(metadata.resolveOperator(INDETERMINATE, ImmutableList.of(value.getType())))
+                    .build();
+
+            return new SpecialForm(IN, BOOLEAN, arguments.build(), functionDependencies);
         }
 
         @Override
@@ -668,7 +653,6 @@ public final class SqlToRowExpressionTranslator
         {
             return new CallExpression(
                     metadata.resolveFunction(QualifiedName.of("not"), fromTypes(BOOLEAN)),
-                    BOOLEAN,
                     ImmutableList.of(value));
         }
 
@@ -678,11 +662,18 @@ public final class SqlToRowExpressionTranslator
             RowExpression first = process(node.getFirst(), context);
             RowExpression second = process(node.getSecond(), context);
 
+            ResolvedFunction resolvedFunction = metadata.resolveOperator(EQUAL, ImmutableList.of(first.getType(), second.getType()));
+            List<ResolvedFunction> functionDependencies = ImmutableList.<ResolvedFunction>builder()
+                    .add(resolvedFunction)
+                    .add(metadata.getCoercion(first.getType(), resolvedFunction.getSignature().getArgumentTypes().get(0)))
+                    .add(metadata.getCoercion(second.getType(), resolvedFunction.getSignature().getArgumentTypes().get(0)))
+                    .build();
+
             return new SpecialForm(
                     NULL_IF,
                     getType(node),
-                    first,
-                    second);
+                    ImmutableList.of(first, second),
+                    functionDependencies);
         }
 
         @Override
@@ -692,12 +683,15 @@ public final class SqlToRowExpressionTranslator
             RowExpression min = process(node.getMin(), context);
             RowExpression max = process(node.getMax(), context);
 
+            List<ResolvedFunction> functionDependencies = ImmutableList.<ResolvedFunction>builder()
+                    .add(metadata.resolveOperator(LESS_THAN_OR_EQUAL, ImmutableList.of(value.getType(), max.getType())))
+                    .build();
+
             return new SpecialForm(
                     BETWEEN,
                     BOOLEAN,
-                    value,
-                    min,
-                    max);
+                    ImmutableList.of(value, min, max),
+                    functionDependencies);
         }
 
         @Override
@@ -708,7 +702,6 @@ public final class SqlToRowExpressionTranslator
 
             return call(
                     metadata.resolveOperator(SUBSCRIPT, ImmutableList.of(base.getType(), index.getType())),
-                    getType(node),
                     base,
                     index);
         }

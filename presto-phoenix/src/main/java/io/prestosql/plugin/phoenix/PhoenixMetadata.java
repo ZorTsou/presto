@@ -19,9 +19,12 @@ import io.airlift.slice.Slice;
 import io.prestosql.plugin.jdbc.JdbcColumnHandle;
 import io.prestosql.plugin.jdbc.JdbcIdentity;
 import io.prestosql.plugin.jdbc.JdbcMetadata;
+import io.prestosql.plugin.jdbc.JdbcMetadataConfig;
 import io.prestosql.plugin.jdbc.JdbcOutputTableHandle;
 import io.prestosql.plugin.jdbc.JdbcTableHandle;
 import io.prestosql.spi.PrestoException;
+import io.prestosql.spi.connector.AggregateFunction;
+import io.prestosql.spi.connector.AggregationApplicationResult;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.connector.ColumnMetadata;
 import io.prestosql.spi.connector.ConnectorInsertTableHandle;
@@ -40,6 +43,9 @@ import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.client.HBaseAdmin;
+import org.apache.hadoop.hbase.io.compress.Compression;
+import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
+import org.apache.hadoop.hbase.regionserver.BloomType;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.query.QueryConstants;
@@ -89,9 +95,9 @@ public class PhoenixMetadata
     private final PhoenixClient phoenixClient;
 
     @Inject
-    public PhoenixMetadata(PhoenixClient phoenixClient)
+    public PhoenixMetadata(PhoenixClient phoenixClient, JdbcMetadataConfig metadataConfig)
     {
-        super(phoenixClient, true);
+        super(phoenixClient, metadataConfig.isAllowDropTable());
         this.phoenixClient = requireNonNull(phoenixClient, "client is null");
     }
 
@@ -161,8 +167,8 @@ public class PhoenixMetadata
             HColumnDescriptor[] columnFamilies = tableDesc.getColumnFamilies();
             for (HColumnDescriptor columnFamily : columnFamilies) {
                 if (columnFamily.getNameAsString().equals(defaultFamilyName)) {
-                    if (!"NONE".equals(columnFamily.getBloomFilterType().toString())) {
-                        properties.put(PhoenixTableProperties.BLOOMFILTER, columnFamily.getBloomFilterType().toString());
+                    if (columnFamily.getBloomFilterType() != BloomType.NONE) {
+                        properties.put(PhoenixTableProperties.BLOOMFILTER, columnFamily.getBloomFilterType());
                     }
                     if (columnFamily.getMaxVersions() != 1) {
                         properties.put(PhoenixTableProperties.VERSIONS, columnFamily.getMaxVersions());
@@ -170,11 +176,14 @@ public class PhoenixMetadata
                     if (columnFamily.getMinVersions() > 0) {
                         properties.put(PhoenixTableProperties.MIN_VERSIONS, columnFamily.getMinVersions());
                     }
-                    if (!columnFamily.getCompression().toString().equals("NONE")) {
-                        properties.put(PhoenixTableProperties.COMPRESSION, columnFamily.getCompression().toString());
+                    if (columnFamily.getCompression() != Compression.Algorithm.NONE) {
+                        properties.put(PhoenixTableProperties.COMPRESSION, columnFamily.getCompression());
                     }
                     if (columnFamily.getTimeToLive() < FOREVER) {
                         properties.put(PhoenixTableProperties.TTL, columnFamily.getTimeToLive());
+                    }
+                    if (columnFamily.getDataBlockEncoding() != DataBlockEncoding.NONE) {
+                        properties.put(PhoenixTableProperties.DATA_BLOCK_ENCODING, columnFamily.getDataBlockEncoding());
                     }
                     break;
                 }
@@ -240,25 +249,29 @@ public class PhoenixMetadata
     @Override
     public boolean supportsMissingColumnsOnInsert()
     {
-        return false;
+        return true;
     }
 
     @Override
     public ConnectorInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle, List<ColumnHandle> columns)
     {
         JdbcTableHandle handle = (JdbcTableHandle) tableHandle;
-        List<JdbcColumnHandle> allColumns = phoenixClient.getColumns(session, handle);
-        List<JdbcColumnHandle> nonRowkeyColumns = allColumns.stream()
-                .filter(column -> !ROWKEY.equalsIgnoreCase(column.getColumnName()))
+        Optional<String> rowkeyColumn = phoenixClient.getColumns(session, handle).stream()
+                .map(JdbcColumnHandle::getColumnName)
+                .filter(ROWKEY::equalsIgnoreCase)
+                .findFirst();
+
+        List<JdbcColumnHandle> columnHandles = columns.stream()
+                .map(JdbcColumnHandle.class::cast)
                 .collect(toImmutableList());
 
         return new PhoenixOutputTableHandle(
                 Optional.ofNullable(handle.getSchemaName()),
                 handle.getTableName(),
-                nonRowkeyColumns.stream().map(JdbcColumnHandle::getColumnName).collect(toImmutableList()),
-                nonRowkeyColumns.stream().map(JdbcColumnHandle::getColumnType).collect(toImmutableList()),
-                Optional.of(nonRowkeyColumns.stream().map(JdbcColumnHandle::getJdbcTypeHandle).collect(toImmutableList())),
-                nonRowkeyColumns.size() != allColumns.size());
+                columnHandles.stream().map(JdbcColumnHandle::getColumnName).collect(toImmutableList()),
+                columnHandles.stream().map(JdbcColumnHandle::getColumnType).collect(toImmutableList()),
+                Optional.of(columnHandles.stream().map(JdbcColumnHandle::getJdbcTypeHandle).collect(toImmutableList())),
+                rowkeyColumn);
     }
 
     @Override
@@ -331,13 +344,13 @@ public class PhoenixMetadata
             ImmutableList.Builder<String> columnList = ImmutableList.builder();
             Set<ColumnMetadata> rowkeyColumns = tableColumns.stream().filter(col -> isPrimaryKey(col, tableProperties)).collect(toSet());
             ImmutableList.Builder<String> pkNames = ImmutableList.builder();
-            boolean hasUUIDRowkey = false;
+            Optional<String> rowkeyColumn = Optional.empty();
             if (rowkeyColumns.isEmpty()) {
                 // Add a rowkey when not specified in DDL
                 columnList.add(ROWKEY + " bigint not null");
                 pkNames.add(ROWKEY);
                 phoenixClient.execute(session, format("CREATE SEQUENCE %s", getEscapedTableName(schema, table + "_sequence")));
-                hasUUIDRowkey = true;
+                rowkeyColumn = Optional.of(ROWKEY);
             }
             for (ColumnMetadata column : tableColumns) {
                 String columnName = column.getName();
@@ -364,6 +377,7 @@ public class PhoenixMetadata
             PhoenixTableProperties.getMinVersions(tableProperties).ifPresent(value -> tableOptions.add(HColumnDescriptor.MIN_VERSIONS + "=" + value));
             PhoenixTableProperties.getCompression(tableProperties).ifPresent(value -> tableOptions.add(HColumnDescriptor.COMPRESSION + "='" + value + "'"));
             PhoenixTableProperties.getTimeToLive(tableProperties).ifPresent(value -> tableOptions.add(HColumnDescriptor.TTL + "=" + value));
+            PhoenixTableProperties.getDataBlockEncoding(tableProperties).ifPresent(value -> tableOptions.add(HColumnDescriptor.DATA_BLOCK_ENCODING + "='" + value + "'"));
 
             String sql = format(
                     "CREATE %s TABLE %s (%s , CONSTRAINT PK PRIMARY KEY (%s)) %s",
@@ -381,7 +395,7 @@ public class PhoenixMetadata
                     columnNames.build(),
                     columnTypes.build(),
                     Optional.empty(),
-                    hasUUIDRowkey);
+                    rowkeyColumn);
         }
         catch (SQLException e) {
             if (e.getErrorCode() == SQLExceptionCode.TABLE_ALREADY_EXIST.getErrorCode()) {
@@ -389,5 +403,17 @@ public class PhoenixMetadata
             }
             throw new PrestoException(PHOENIX_METADATA_ERROR, "Error creating Phoenix table", e);
         }
+    }
+
+    @Override
+    public Optional<AggregationApplicationResult<ConnectorTableHandle>> applyAggregation(
+            ConnectorSession session,
+            ConnectorTableHandle table,
+            List<AggregateFunction> aggregates,
+            Map<String, ColumnHandle> assignments,
+            List<List<ColumnHandle>> groupingSets)
+    {
+        // TODO support aggregation pushdown
+        return Optional.empty();
     }
 }

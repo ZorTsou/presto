@@ -29,7 +29,8 @@ import org.testng.annotations.Test;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.sql.Timestamp;
-import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.List;
 
 import static com.datastax.driver.core.utils.Bytes.toRawHexString;
@@ -48,7 +49,7 @@ import static io.prestosql.spi.type.BooleanType.BOOLEAN;
 import static io.prestosql.spi.type.DoubleType.DOUBLE;
 import static io.prestosql.spi.type.IntegerType.INTEGER;
 import static io.prestosql.spi.type.RealType.REAL;
-import static io.prestosql.spi.type.TimestampType.TIMESTAMP;
+import static io.prestosql.spi.type.TimestampWithTimeZoneType.TIMESTAMP_WITH_TIME_ZONE;
 import static io.prestosql.spi.type.VarbinaryType.VARBINARY;
 import static io.prestosql.spi.type.VarcharType.VARCHAR;
 import static io.prestosql.spi.type.VarcharType.createUnboundedVarcharType;
@@ -57,8 +58,12 @@ import static io.prestosql.testing.MaterializedResult.DEFAULT_PRECISION;
 import static io.prestosql.testing.MaterializedResult.resultBuilder;
 import static io.prestosql.testing.QueryAssertions.assertContains;
 import static io.prestosql.testing.QueryAssertions.assertContainsEventually;
+import static io.prestosql.tpch.TpchTable.CUSTOMER;
+import static io.prestosql.tpch.TpchTable.NATION;
 import static io.prestosql.tpch.TpchTable.ORDERS;
+import static io.prestosql.tpch.TpchTable.REGION;
 import static java.lang.String.format;
+import static java.util.Comparator.comparing;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.stream.Collectors.toList;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -70,9 +75,7 @@ public class TestCassandraIntegrationSmokeTest
     private static final String KEYSPACE = "smoke_test";
     private static final Session SESSION = createCassandraSession(KEYSPACE);
 
-    private static final Timestamp DATE_TIME_LOCAL = Timestamp.valueOf(LocalDateTime.of(1970, 1, 1, 3, 4, 5, 0));
-    // TODO should match DATE_TIME_LOCAL after https://github.com/prestosql/presto/issues/37
-    private static final LocalDateTime TIMESTAMP_LOCAL = LocalDateTime.of(1969, 12, 31, 23, 4, 5);
+    private static final ZonedDateTime TIMESTAMP_VALUE = ZonedDateTime.of(1970, 1, 1, 3, 4, 5, 0, ZoneId.of("UTC"));
 
     private CassandraServer server;
     private CassandraSession session;
@@ -83,8 +86,8 @@ public class TestCassandraIntegrationSmokeTest
     {
         server = new CassandraServer();
         session = server.getSession();
-        createTestTables(session, KEYSPACE, DATE_TIME_LOCAL);
-        return createCassandraQueryRunner(server, ORDERS);
+        createTestTables(session, KEYSPACE, Timestamp.from(TIMESTAMP_VALUE.toInstant()));
+        return createCassandraQueryRunner(server, CUSTOMER, NATION, ORDERS, REGION);
     }
 
     @AfterClass(alwaysRun = true)
@@ -102,7 +105,7 @@ public class TestCassandraIntegrationSmokeTest
                 .row("custkey", "bigint", "", "")
                 .row("orderstatus", "varchar", "", "")
                 .row("totalprice", "double", "", "")
-                .row("orderdate", "varchar", "", "")
+                .row("orderdate", "date", "", "")
                 .row("orderpriority", "varchar", "", "")
                 .row("clerk", "varchar", "", "")
                 .row("shippriority", "integer", "", "")
@@ -121,7 +124,7 @@ public class TestCassandraIntegrationSmokeTest
                         "   custkey bigint,\n" +
                         "   orderstatus varchar,\n" +
                         "   totalprice double,\n" +
-                        "   orderdate varchar,\n" +
+                        "   orderdate date,\n" +
                         "   orderpriority varchar,\n" +
                         "   clerk varchar,\n" +
                         "   shippriority integer,\n" +
@@ -139,7 +142,7 @@ public class TestCassandraIntegrationSmokeTest
                 " AND typeinteger = 7" +
                 " AND typelong = 1007" +
                 " AND typebytes = from_hex('" + toRawHexString(ByteBuffer.wrap(Ints.toByteArray(7))) + "')" +
-                " AND typetimestamp = TIMESTAMP '1969-12-31 23:04:05'" +
+                " AND typetimestamp = TIMESTAMP '1970-01-01 03:04:05Z'" +
                 " AND typeansi = 'ansi 7'" +
                 " AND typeboolean = false" +
                 " AND typedecimal = 128.0" +
@@ -297,17 +300,17 @@ public class TestCassandraIntegrationSmokeTest
         assertEquals(execute(sql).getRowCount(), 4);
         sql = "SELECT * FROM " + TABLE_CLUSTERING_KEYS_INEQUALITY + " WHERE key='key_1' AND clust_one='clust_one' AND clust_two=2";
         assertEquals(execute(sql).getRowCount(), 1);
-        sql = "SELECT * FROM " + TABLE_CLUSTERING_KEYS_INEQUALITY + " WHERE key='key_1' AND clust_one='clust_one' AND clust_two=2 AND clust_three = timestamp '1969-12-31 23:04:05.020'";
+        sql = "SELECT * FROM " + TABLE_CLUSTERING_KEYS_INEQUALITY + " WHERE key='key_1' AND clust_one='clust_one' AND clust_two=2 AND clust_three = timestamp '1970-01-01 03:04:05.020Z'";
         assertEquals(execute(sql).getRowCount(), 1);
-        sql = "SELECT * FROM " + TABLE_CLUSTERING_KEYS_INEQUALITY + " WHERE key='key_1' AND clust_one='clust_one' AND clust_two=2 AND clust_three = timestamp '1969-12-31 23:04:05.010'";
+        sql = "SELECT * FROM " + TABLE_CLUSTERING_KEYS_INEQUALITY + " WHERE key='key_1' AND clust_one='clust_one' AND clust_two=2 AND clust_three = timestamp '1970-01-01 03:04:05.010Z'";
         assertEquals(execute(sql).getRowCount(), 0);
         sql = "SELECT * FROM " + TABLE_CLUSTERING_KEYS_INEQUALITY + " WHERE key='key_1' AND clust_one='clust_one' AND clust_two IN (1,2)";
         assertEquals(execute(sql).getRowCount(), 2);
         sql = "SELECT * FROM " + TABLE_CLUSTERING_KEYS_INEQUALITY + " WHERE key='key_1' AND clust_one='clust_one' AND clust_two > 1 AND clust_two < 3";
         assertEquals(execute(sql).getRowCount(), 1);
-        sql = "SELECT * FROM " + TABLE_CLUSTERING_KEYS_INEQUALITY + " WHERE key='key_1' AND clust_one='clust_one' AND clust_two=2 AND clust_three >= timestamp '1969-12-31 23:04:05.010' AND clust_three <= timestamp '1969-12-31 23:04:05.020'";
+        sql = "SELECT * FROM " + TABLE_CLUSTERING_KEYS_INEQUALITY + " WHERE key='key_1' AND clust_one='clust_one' AND clust_two=2 AND clust_three >= timestamp '1970-01-01 03:04:05.010Z' AND clust_three <= timestamp '1970-01-01 03:04:05.020Z'";
         assertEquals(execute(sql).getRowCount(), 1);
-        sql = "SELECT * FROM " + TABLE_CLUSTERING_KEYS_INEQUALITY + " WHERE key='key_1' AND clust_one='clust_one' AND clust_two IN (1,2) AND clust_three >= timestamp '1969-12-31 23:04:05.010' AND clust_three <= timestamp '1969-12-31 23:04:05.020'";
+        sql = "SELECT * FROM " + TABLE_CLUSTERING_KEYS_INEQUALITY + " WHERE key='key_1' AND clust_one='clust_one' AND clust_two IN (1,2) AND clust_three >= timestamp '1970-01-01 03:04:05.010Z' AND clust_three <= timestamp '1970-01-01 03:04:05.020Z'";
         assertEquals(execute(sql).getRowCount(), 2);
         sql = "SELECT * FROM " + TABLE_CLUSTERING_KEYS_INEQUALITY + " WHERE key='key_1' AND clust_one='clust_one' AND clust_two IN (1,2,3) AND clust_two < 2";
         assertEquals(execute(sql).getRowCount(), 1);
@@ -558,7 +561,7 @@ public class TestCassandraIntegrationSmokeTest
                 "1, " +
                 "1000, " +
                 "null, " +
-                "timestamp '1970-01-01 08:34:05.0', " +
+                "timestamp '1970-01-01 08:34:05.0Z', " +
                 "'ansi1', " +
                 "true, " +
                 "null, " +
@@ -582,7 +585,7 @@ public class TestCassandraIntegrationSmokeTest
                 1,
                 1000L,
                 null,
-                LocalDateTime.of(1970, 1, 1, 8, 34, 5),
+                ZonedDateTime.of(1970, 1, 1, 8, 34, 5, 0, ZoneId.of("UTC")),
                 "ansi1",
                 true,
                 null,
@@ -662,7 +665,7 @@ public class TestCassandraIntegrationSmokeTest
                 INTEGER,
                 BIGINT,
                 VARBINARY,
-                TIMESTAMP,
+                TIMESTAMP_WITH_TIME_ZONE,
                 createUnboundedVarcharType(),
                 BOOLEAN,
                 DOUBLE,
@@ -677,7 +680,7 @@ public class TestCassandraIntegrationSmokeTest
                 createUnboundedVarcharType()));
 
         List<MaterializedRow> sortedRows = result.getMaterializedRows().stream()
-                .sorted((o1, o2) -> o1.getField(1).toString().compareTo(o2.getField(1).toString()))
+                .sorted(comparing(o -> o.getField(1).toString()))
                 .collect(toList());
 
         for (int rowNumber = 1; rowNumber <= rowCount; rowNumber++) {
@@ -687,7 +690,7 @@ public class TestCassandraIntegrationSmokeTest
                     rowNumber,
                     rowNumber + 1000L,
                     ByteBuffer.wrap(Ints.toByteArray(rowNumber)),
-                    TIMESTAMP_LOCAL,
+                    TIMESTAMP_VALUE,
                     "ansi " + rowNumber,
                     rowNumber % 2 == 0,
                     Math.pow(2, rowNumber),

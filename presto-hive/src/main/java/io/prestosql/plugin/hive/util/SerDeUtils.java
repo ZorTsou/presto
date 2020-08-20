@@ -40,6 +40,7 @@ import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.PrimitiveObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.StructField;
 import org.apache.hadoop.hive.serde2.objectinspector.StructObjectInspector;
+import org.apache.hadoop.hive.serde2.objectinspector.UnionObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.BinaryObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.BooleanObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.ByteObjectInspector;
@@ -54,15 +55,13 @@ import org.apache.hadoop.hive.serde2.objectinspector.primitive.LongObjectInspect
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.ShortObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.StringObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.TimestampObjectInspector;
-import org.joda.time.DateTimeZone;
 
-import java.sql.Timestamp;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.prestosql.spi.type.Chars.truncateToLengthAndTrimSpaces;
+import static io.prestosql.spi.type.TinyintType.TINYINT;
 import static io.prestosql.spi.type.VarbinaryType.VARBINARY;
 import static java.lang.Float.floatToRawIntBits;
 import static java.util.Objects.requireNonNull;
@@ -73,7 +72,8 @@ public final class SerDeUtils
 
     public static Block getBlockObject(Type type, Object object, ObjectInspector objectInspector)
     {
-        return requireNonNull(serializeObject(type, null, object, objectInspector), "serialized result is null");
+        Block block = serializeObject(type, null, object, objectInspector);
+        return requireNonNull(block, "serialized result is null");
     }
 
     public static Block serializeObject(Type type, BlockBuilder builder, Object object, ObjectInspector inspector)
@@ -96,6 +96,8 @@ public final class SerDeUtils
                 return serializeMap(type, builder, object, (MapObjectInspector) inspector, filterNullMapKeys);
             case STRUCT:
                 return serializeStruct(type, builder, object, (StructObjectInspector) inspector);
+            case UNION:
+                return serializeUnion(type, builder, object, (UnionObjectInspector) inspector);
         }
         throw new RuntimeException("Unknown object inspector category: " + inspector.getCategory());
     }
@@ -272,6 +274,43 @@ public final class SerDeUtils
         }
     }
 
+    // Use row blocks to represent union objects when reading
+    private static Block serializeUnion(Type type, BlockBuilder builder, Object object, UnionObjectInspector inspector)
+    {
+        if (object == null) {
+            requireNonNull(builder, "parent builder is null").appendNull();
+            return null;
+        }
+
+        boolean builderSynthesized = false;
+        if (builder == null) {
+            builderSynthesized = true;
+            builder = type.createBlockBuilder(null, 1);
+        }
+
+        BlockBuilder currentBuilder = builder.beginBlockEntry();
+
+        byte tag = inspector.getTag(object);
+        TINYINT.writeLong(currentBuilder, tag);
+
+        List<Type> typeParameters = type.getTypeParameters();
+        for (int i = 1; i < typeParameters.size(); i++) {
+            if (i == tag + 1) {
+                serializeObject(typeParameters.get(i), currentBuilder, inspector.getField(object), inspector.getObjectInspectors().get(tag));
+            }
+            else {
+                currentBuilder.appendNull();
+            }
+        }
+
+        builder.closeEntry();
+        if (builderSynthesized) {
+            return (Block) type.getObject(builder, 0);
+        }
+        return null;
+    }
+
+    @SuppressWarnings("deprecation")
     private static long formatDateAsLong(Object object, DateObjectInspector inspector)
     {
         if (object instanceof LazyDate) {
@@ -280,27 +319,14 @@ public final class SerDeUtils
         if (object instanceof DateWritable) {
             return ((DateWritable) object).getDays();
         }
-
-        // Hive will return java.sql.Date at midnight in JVM time zone
-        long millisLocal = inspector.getPrimitiveJavaObject(object).getTime();
-        // Convert it to midnight in UTC
-        long millisUtc = DateTimeZone.getDefault().getMillisKeepLocal(DateTimeZone.UTC, millisLocal);
-        // Convert midnight UTC to days
-        return TimeUnit.MILLISECONDS.toDays(millisUtc);
+        return inspector.getPrimitiveJavaObject(object).toEpochDay();
     }
 
     private static long formatTimestampAsLong(Object object, TimestampObjectInspector inspector)
     {
-        Timestamp timestamp = getTimestamp(object, inspector);
-        return timestamp.getTime();
-    }
-
-    private static Timestamp getTimestamp(Object object, TimestampObjectInspector inspector)
-    {
-        // handle broken ObjectInspectors
         if (object instanceof TimestampWritable) {
-            return ((TimestampWritable) object).getTimestamp();
+            return ((TimestampWritable) object).getTimestamp().getTime();
         }
-        return inspector.getPrimitiveJavaObject(object);
+        return inspector.getPrimitiveJavaObject(object).toEpochMilli();
     }
 }

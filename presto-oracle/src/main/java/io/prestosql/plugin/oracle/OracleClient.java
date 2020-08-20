@@ -14,6 +14,7 @@
 package io.prestosql.plugin.oracle;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import io.prestosql.plugin.jdbc.BaseJdbcClient;
 import io.prestosql.plugin.jdbc.BaseJdbcConfig;
 import io.prestosql.plugin.jdbc.ColumnMapping;
@@ -31,7 +32,6 @@ import io.prestosql.spi.type.CharType;
 import io.prestosql.spi.type.Chars;
 import io.prestosql.spi.type.DecimalType;
 import io.prestosql.spi.type.Decimals;
-import io.prestosql.spi.type.TimestampType;
 import io.prestosql.spi.type.Type;
 import io.prestosql.spi.type.VarcharType;
 import oracle.jdbc.OraclePreparedStatement;
@@ -55,6 +55,7 @@ import java.time.ZonedDateTime;
 import java.util.Calendar;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TimeZone;
 
 import static io.airlift.slice.Slices.utf8Slice;
@@ -72,7 +73,7 @@ import static io.prestosql.plugin.jdbc.StandardColumnMappings.smallintWriteFunct
 import static io.prestosql.plugin.jdbc.StandardColumnMappings.tinyintWriteFunction;
 import static io.prestosql.plugin.jdbc.StandardColumnMappings.varbinaryWriteFunction;
 import static io.prestosql.plugin.jdbc.StandardColumnMappings.varcharWriteFunction;
-import static io.prestosql.plugin.jdbc.TypeHandlingJdbcPropertiesProvider.getUnsupportedTypeHandling;
+import static io.prestosql.plugin.jdbc.TypeHandlingJdbcSessionProperties.getUnsupportedTypeHandling;
 import static io.prestosql.plugin.jdbc.UnsupportedTypeHandling.CONVERT_TO_VARCHAR;
 import static io.prestosql.plugin.oracle.OracleSessionProperties.getNumberDefaultScale;
 import static io.prestosql.plugin.oracle.OracleSessionProperties.getNumberRoundingMode;
@@ -112,7 +113,6 @@ import static java.util.concurrent.TimeUnit.DAYS;
 public class OracleClient
         extends BaseJdbcClient
 {
-    // single UTF char may require up to 4 bytes of storage
     private static final int MAX_BYTES_PER_CHAR = 4;
 
     private static final int ORACLE_VARCHAR2_MAX_BYTES = 4000;
@@ -123,8 +123,18 @@ public class OracleClient
 
     private static final int PRECISION_OF_UNSPECIFIED_NUMBER = 127;
 
+    private static final Set<String> INTERNAL_SCHEMAS = ImmutableSet.<String>builder()
+            .add("ctxsys")
+            .add("flows_files")
+            .add("mdsys")
+            .add("outln")
+            .add("sys")
+            .add("system")
+            .add("xdb")
+            .add("xs$null")
+            .build();
+
     private final boolean synonymsEnabled;
-    private final int fetchSize = 1000;
 
     private static final Map<Type, WriteMapping> WRITE_MAPPINGS = ImmutableMap.<Type, WriteMapping>builder()
             .put(BOOLEAN, oracleBooleanWriteMapping())
@@ -173,11 +183,20 @@ public class OracleClient
     }
 
     @Override
+    protected boolean filterSchema(String schemaName)
+    {
+        if (INTERNAL_SCHEMAS.contains(schemaName.toLowerCase(ENGLISH))) {
+            return false;
+        }
+        return super.filterSchema(schemaName);
+    }
+
+    @Override
     public PreparedStatement getPreparedStatement(Connection connection, String sql)
             throws SQLException
     {
         PreparedStatement statement = connection.prepareStatement(sql);
-        statement.setFetchSize(fetchSize);
+        statement.setFetchSize(1000);
         return statement;
     }
 
@@ -303,7 +322,7 @@ public class OracleClient
 
             // This mapping covers both DATE and TIMESTAMP, as Oracle's DATE has second precision.
             case OracleTypes.TIMESTAMP:
-                return Optional.of(oracleTimestampColumnMapping(session));
+                return Optional.of(oracleTimestampColumnMapping());
             case OracleTypes.TIMESTAMPTZ:
                 return Optional.of(oracleTimestampWithTimeZoneColumnMapping());
         }
@@ -323,34 +342,22 @@ public class OracleClient
         };
     }
 
-    public static LongWriteFunction oracleTimestampWriteFunction(ConnectorSession session)
+    public static LongWriteFunction oracleTimestampWriteFunction()
     {
-        if (session.isLegacyTimestamp()) {
-            return (statement, index, utcMillis) -> {
-                long dateTimeAsUtcMillis = Instant.ofEpochMilli(utcMillis)
-                        .atZone(ZoneId.of(session.getTimeZoneKey().getId()))
-                        .withZoneSameLocal(ZoneOffset.UTC)
-                        .toInstant().toEpochMilli();
-                statement.setObject(index, new oracle.sql.TIMESTAMP(new Timestamp(dateTimeAsUtcMillis), Calendar.getInstance(TimeZone.getTimeZone("UTC"))));
-            };
-        }
         return (statement, index, utcMillis) -> {
             statement.setObject(index, new oracle.sql.TIMESTAMP(new Timestamp(utcMillis), Calendar.getInstance(TimeZone.getTimeZone("UTC"))));
         };
     }
 
-    public static ColumnMapping oracleTimestampColumnMapping(ConnectorSession session)
+    public static ColumnMapping oracleTimestampColumnMapping()
     {
         return ColumnMapping.longMapping(
                 TIMESTAMP,
                 (resultSet, columnIndex) -> {
                     LocalDateTime timestamp = resultSet.getObject(columnIndex, LocalDateTime.class);
-                    if (session.isLegacyTimestamp()) {
-                        return timestamp.atZone(ZoneId.of(session.getTimeZoneKey().getId())).toInstant().toEpochMilli();
-                    }
                     return timestamp.toInstant(ZoneOffset.UTC).toEpochMilli();
                 },
-                oracleTimestampWriteFunction(session));
+                oracleTimestampWriteFunction());
     }
 
     public static ColumnMapping oracleTimestampWithTimeZoneColumnMapping()
@@ -430,8 +437,8 @@ public class OracleClient
             }
             return WriteMapping.sliceMapping(dataType, longDecimalWriteFunction((DecimalType) type));
         }
-        if (type instanceof TimestampType) {
-            return WriteMapping.longMapping("timestamp(3)", oracleTimestampWriteFunction(session));
+        if (type.equals(TIMESTAMP)) {
+            return WriteMapping.longMapping("timestamp(3)", oracleTimestampWriteFunction());
         }
         WriteMapping writeMapping = WRITE_MAPPINGS.get(type);
         if (writeMapping != null) {

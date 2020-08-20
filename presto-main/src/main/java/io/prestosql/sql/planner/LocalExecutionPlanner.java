@@ -38,7 +38,6 @@ import io.prestosql.execution.buffer.PagesSerdeFactory;
 import io.prestosql.index.IndexManager;
 import io.prestosql.metadata.Metadata;
 import io.prestosql.metadata.ResolvedFunction;
-import io.prestosql.metadata.Signature;
 import io.prestosql.metadata.TableHandle;
 import io.prestosql.operator.AggregationOperator.AggregationOperatorFactory;
 import io.prestosql.operator.AssignUniqueIdOperator;
@@ -124,6 +123,7 @@ import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.connector.ConnectorIndex;
 import io.prestosql.spi.connector.ConnectorSession;
 import io.prestosql.spi.connector.RecordSet;
+import io.prestosql.spi.predicate.Domain;
 import io.prestosql.spi.predicate.NullableValue;
 import io.prestosql.spi.predicate.TupleDomain;
 import io.prestosql.spi.type.Type;
@@ -148,6 +148,7 @@ import io.prestosql.sql.planner.plan.AssignUniqueId;
 import io.prestosql.sql.planner.plan.Assignments;
 import io.prestosql.sql.planner.plan.DeleteNode;
 import io.prestosql.sql.planner.plan.DistinctLimitNode;
+import io.prestosql.sql.planner.plan.DynamicFilterId;
 import io.prestosql.sql.planner.plan.EnforceSingleRowNode;
 import io.prestosql.sql.planner.plan.ExchangeNode;
 import io.prestosql.sql.planner.plan.ExplainAnalyzeNode;
@@ -607,6 +608,11 @@ public class LocalExecutionPlanner
             return dynamicFiltersCollector;
         }
 
+        private void addDynamicFilter(Map<DynamicFilterId, Domain> dynamicTupleDomain)
+        {
+            taskContext.collectDynamicTupleDomain(dynamicTupleDomain);
+        }
+
         public Optional<IndexSourceContext> getIndexSourceContext()
         {
             return indexSourceContext;
@@ -932,15 +938,14 @@ public class LocalExecutionPlanner
                 }
                 Symbol symbol = entry.getKey();
                 WindowFunctionSupplier windowFunctionSupplier = metadata.getWindowFunctionImplementation(resolvedFunction);
-                Type type = metadata.getType(resolvedFunction.getSignature().getReturnType());
+                Type type = resolvedFunction.getSignature().getReturnType();
 
                 List<LambdaExpression> lambdaExpressions = function.getArguments().stream()
                         .filter(LambdaExpression.class::isInstance)
                         .map(LambdaExpression.class::cast)
                         .collect(toImmutableList());
                 List<FunctionType> functionTypes = resolvedFunction.getSignature().getArgumentTypes().stream()
-                        .filter(typeSignature -> typeSignature.getBase().equals(FunctionType.NAME))
-                        .map(metadata::getType)
+                        .filter(FunctionType.class::isInstance)
                         .map(FunctionType.class::cast)
                         .collect(toImmutableList());
 
@@ -1776,11 +1781,10 @@ public class LocalExecutionPlanner
 
         private SpatialPredicate spatialTest(FunctionCall functionCall, boolean probeFirst, Optional<ComparisonExpression.Operator> comparisonOperator)
         {
-            String functionName = ResolvedFunction.fromQualifiedName(functionCall.getName())
-                    .map(ResolvedFunction::getSignature)
-                    .map(Signature::getName)
-                    .map(name -> name.toLowerCase(Locale.ENGLISH))
-                    .orElse(functionCall.getName().toString());
+            String functionName = metadata.resolveFunction(functionCall.getName(), ImmutableList.of())
+                    .getSignature()
+                    .getName()
+                    .toLowerCase(Locale.ENGLISH);
             switch (functionName) {
                 case ST_CONTAINS:
                     if (probeFirst) {
@@ -2119,14 +2123,14 @@ public class LocalExecutionPlanner
         }
 
         private DynamicFilterSourceOperatorFactory createDynamicFilterSourceOperatorFactory(
-                LocalDynamicFilter dynamicFilter,
+                LocalDynamicFilterConsumer dynamicFilter,
                 JoinNode node,
                 PhysicalOperation buildSource,
                 LocalExecutionPlanContext context)
         {
             List<DynamicFilterSourceOperator.Channel> filterBuildChannels = dynamicFilter.getBuildChannels().entrySet().stream()
                     .map(entry -> {
-                        String filterId = entry.getKey();
+                        DynamicFilterId filterId = entry.getKey();
                         int index = entry.getValue();
                         Type type = buildSource.getTypes().get(index);
                         return new DynamicFilterSourceOperator.Channel(filterId, type, index);
@@ -2141,7 +2145,7 @@ public class LocalExecutionPlanner
                     getDynamicFilteringMaxPerDriverSize(context.getSession()));
         }
 
-        private Optional<LocalDynamicFilter> createDynamicFilter(PhysicalOperation buildSource, JoinNode node, LocalExecutionPlanContext context, int partitionCount)
+        private Optional<LocalDynamicFilterConsumer> createDynamicFilter(PhysicalOperation buildSource, JoinNode node, LocalExecutionPlanContext context, int partitionCount)
         {
             if (node.getDynamicFilters().isEmpty()) {
                 return Optional.empty();
@@ -2151,14 +2155,12 @@ public class LocalExecutionPlanner
                     "Dynamic filtering cannot be used with grouped execution");
             log.debug("[Join] Dynamic filters: %s", node.getDynamicFilters());
             LocalDynamicFiltersCollector collector = context.getDynamicFiltersCollector();
-            return LocalDynamicFilter
-                    .create(node, context.getTypes(), partitionCount)
-                    .map(filter -> {
-                        // Intersect dynamic filters' predicates when they become ready,
-                        // in order to support multiple join nodes in the same plan fragment.
-                        addSuccessCallback(filter.getResultFuture(), collector::addDynamicFilter);
-                        return filter;
-                    });
+            LocalDynamicFilterConsumer filterConsumer = LocalDynamicFilterConsumer.create(node, buildSource.getTypes(), partitionCount);
+            // Intersect dynamic filters' predicates when they become ready,
+            // in order to support multiple join nodes in the same plan fragment.
+            addSuccessCallback(filterConsumer.getDynamicFilterDomains(), context::addDynamicFilter);
+            addSuccessCallback(filterConsumer.getNodeLocalDynamicFilterForSymbols(), collector::addDynamicFilter);
+            return Optional.of(filterConsumer);
         }
 
         private JoinFilterFunctionFactory compileJoinFilterFunction(
@@ -2330,12 +2332,17 @@ public class LocalExecutionPlanner
                     .map(source::symbolToChannel)
                     .collect(toImmutableList());
 
+            List<String> notNullChannelColumnNames = node.getColumns().stream()
+                    .map(symbol -> node.getNotNullColumnSymbols().contains(symbol) ? node.getColumnNames().get(source.symbolToChannel(symbol)) : null)
+                    .collect(Collectors.toList());
+
             OperatorFactory operatorFactory = new TableWriterOperatorFactory(
                     context.getNextOperatorId(),
                     node.getId(),
                     pageSinkManager,
                     node.getTarget(),
                     inputChannels,
+                    notNullChannelColumnNames,
                     session,
                     statisticsAggregation,
                     getSymbolTypes(node.getOutputSymbols(), context.getTypes()));
@@ -2644,8 +2651,7 @@ public class LocalExecutionPlanner
                     .map(LambdaExpression.class::cast)
                     .collect(toImmutableList());
             List<FunctionType> functionTypes = aggregation.getResolvedFunction().getSignature().getArgumentTypes().stream()
-                    .filter(typeSignature -> typeSignature.getBase().equals(FunctionType.NAME))
-                    .map(metadata::getType)
+                    .filter(FunctionType.class::isInstance)
                     .map(FunctionType.class::cast)
                     .collect(toImmutableList());
 

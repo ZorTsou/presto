@@ -49,6 +49,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.prestosql.plugin.hive.HiveMetadata.TABLE_COMMENT;
 import static io.prestosql.plugin.hive.metastore.MetastoreUtil.isAvroTableWithSchemaSet;
 import static io.prestosql.plugin.hive.metastore.MetastoreUtil.verifyCanDropColumn;
+import static io.prestosql.plugin.hive.metastore.thrift.ThriftMetastoreUtil.csvSchemaFields;
 import static io.prestosql.plugin.hive.metastore.thrift.ThriftMetastoreUtil.fromMetastoreApiDatabase;
 import static io.prestosql.plugin.hive.metastore.thrift.ThriftMetastoreUtil.fromMetastoreApiTable;
 import static io.prestosql.plugin.hive.metastore.thrift.ThriftMetastoreUtil.isAvroTableWithSchemaSet;
@@ -86,8 +87,11 @@ public class BridgingHiveMetastore
     public Optional<Table> getTable(HiveIdentity identity, String databaseName, String tableName)
     {
         return delegate.getTable(identity, databaseName, tableName).map(table -> {
-            if (isAvroTableWithSchemaSet(table) || isCsvTable(table)) {
-                return fromMetastoreApiTable(table, delegate.getFields(identity, databaseName, tableName).get());
+            if (isAvroTableWithSchemaSet(table)) {
+                return fromMetastoreApiTable(table, delegate.getFields(identity, databaseName, tableName).orElseThrow());
+            }
+            if (isCsvTable(table)) {
+                return fromMetastoreApiTable(table, csvSchemaFields(table.getSd().getCols()));
             }
             return fromMetastoreApiTable(table);
         });
@@ -233,6 +237,29 @@ public class BridgingHiveMetastore
         comment.ifPresent(value -> parameters.put(TABLE_COMMENT, comment.get()));
 
         table.setParameters(parameters);
+        alterTable(identity, databaseName, tableName, table);
+    }
+
+    @Override
+    public void commentColumn(HiveIdentity identity, String databaseName, String tableName, String columnName, Optional<String> comment)
+    {
+        Optional<org.apache.hadoop.hive.metastore.api.Table> source = delegate.getTable(identity, databaseName, tableName);
+        if (!source.isPresent()) {
+            throw new TableNotFoundException(new SchemaTableName(databaseName, tableName));
+        }
+        org.apache.hadoop.hive.metastore.api.Table table = source.get();
+
+        for (FieldSchema fieldSchema : table.getSd().getCols()) {
+            if (fieldSchema.getName().equals(columnName)) {
+                if (comment.isPresent()) {
+                    fieldSchema.setComment(comment.get());
+                }
+                else {
+                    fieldSchema.unsetComment();
+                }
+            }
+        }
+
         alterTable(identity, databaseName, tableName, table);
     }
 

@@ -103,7 +103,6 @@ public final class TypeConverter
             .put(RealType.class, Types.FloatType.get())
             .put(IntegerType.class, Types.IntegerType.get())
             .put(TimeType.class, Types.TimeType.get())
-            .put(TimestampType.class, Types.TimestampType.withoutZone())
             .put(TimestampWithTimeZoneType.class, Types.TimestampType.withZone())
             .put(VarcharType.class, Types.StringType.get())
             .build();
@@ -177,6 +176,9 @@ public final class TypeConverter
         if (type instanceof MapType) {
             return fromMap((MapType) type);
         }
+        if (type.equals(TIMESTAMP)) {
+            return Types.TimestampType.withoutZone();
+        }
         throw new PrestoException(NOT_SUPPORTED, "Type not supported for Iceberg: " + type.getDisplayName());
     }
 
@@ -196,7 +198,7 @@ public final class TypeConverter
         for (RowType.Field field : type.getFields()) {
             String name = field.getName().orElseThrow(() ->
                     new PrestoException(NOT_SUPPORTED, "Row type field does not have a name: " + type.getDisplayName()));
-            fields.add(Types.NestedField.required(fields.size() + 1, name, toIcebergType(field.getType())));
+            fields.add(Types.NestedField.optional(fields.size() + 1, name, toIcebergType(field.getType())));
         }
         return Types.StructType.of(fields);
     }
@@ -333,8 +335,8 @@ public final class TypeConverter
             case BINARY:
                 return ImmutableList.of(new OrcType(OrcType.OrcTypeKind.BINARY, ImmutableList.of(), ImmutableList.of(), Optional.empty(), Optional.empty(), Optional.empty(), attributes));
             case DECIMAL:
-                DecimalType decimalType = (DecimalType) type;
-                return ImmutableList.of(new OrcType(OrcType.OrcTypeKind.DECIMAL, ImmutableList.of(), ImmutableList.of(), Optional.empty(), Optional.of(decimalType.getPrecision()), Optional.of(decimalType.getScale()), attributes));
+                Types.DecimalType decimalType = (Types.DecimalType) type;
+                return ImmutableList.of(new OrcType(OrcType.OrcTypeKind.DECIMAL, ImmutableList.of(), ImmutableList.of(), Optional.empty(), Optional.of(decimalType.precision()), Optional.of(decimalType.scale()), attributes));
             case STRUCT:
                 return toOrcStructType(nextFieldTypeIndex, (Types.StructType) type, attributes);
             case LIST:

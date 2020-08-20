@@ -13,7 +13,6 @@
  */
 package io.prestosql.orc;
 
-import com.google.common.base.Strings;
 import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.ContiguousSet;
 import com.google.common.collect.DiscreteDomain;
@@ -25,7 +24,6 @@ import io.prestosql.spi.type.SqlDate;
 import io.prestosql.spi.type.SqlDecimal;
 import io.prestosql.spi.type.SqlTimestamp;
 import io.prestosql.spi.type.SqlVarbinary;
-import io.prestosql.spi.type.TimeZoneKey;
 import org.joda.time.DateTimeZone;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
@@ -56,7 +54,6 @@ import static io.prestosql.spi.type.TinyintType.TINYINT;
 import static io.prestosql.spi.type.VarbinaryType.VARBINARY;
 import static io.prestosql.spi.type.VarcharType.VARCHAR;
 import static io.prestosql.testing.DateTimeTestingUtils.sqlTimestampOf;
-import static io.prestosql.testing.TestingConnectorSession.SESSION;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Collections.nCopies;
 import static java.util.stream.Collectors.toList;
@@ -194,7 +191,7 @@ public abstract class AbstractTestOrcReader
         tester.testRoundTrip(
                 TIMESTAMP,
                 writeValues.stream()
-                        .map(timestamp -> sqlTimestampOf(timestamp, SESSION))
+                        .map(timestamp -> sqlTimestampOf(timestamp))
                         .collect(toList()));
     }
 
@@ -239,8 +236,8 @@ public abstract class AbstractTestOrcReader
 
         Random random = new Random(0);
         List<SqlDecimal> values = new ArrayList<>();
-        values.add(new SqlDecimal(new BigInteger(Strings.repeat("9", 18)), DECIMAL_TYPE_PRECISION_18.getPrecision(), DECIMAL_TYPE_PRECISION_18.getScale()));
-        values.add(new SqlDecimal(new BigInteger("-" + Strings.repeat("9", 18)), DECIMAL_TYPE_PRECISION_18.getPrecision(), DECIMAL_TYPE_PRECISION_18.getScale()));
+        values.add(new SqlDecimal(new BigInteger("9".repeat(18)), DECIMAL_TYPE_PRECISION_18.getPrecision(), DECIMAL_TYPE_PRECISION_18.getScale()));
+        values.add(new SqlDecimal(new BigInteger("-" + "9".repeat(18)), DECIMAL_TYPE_PRECISION_18.getPrecision(), DECIMAL_TYPE_PRECISION_18.getScale()));
         BigInteger nextValue = BigInteger.ONE;
         for (int i = 0; i < 59; i++) {
             values.add(new SqlDecimal(nextValue, DECIMAL_TYPE_PRECISION_18.getPrecision(), DECIMAL_TYPE_PRECISION_18.getScale()));
@@ -258,8 +255,8 @@ public abstract class AbstractTestOrcReader
 
         random = new Random(0);
         values = new ArrayList<>();
-        values.add(new SqlDecimal(new BigInteger(Strings.repeat("9", 38)), DECIMAL_TYPE_PRECISION_38.getPrecision(), DECIMAL_TYPE_PRECISION_38.getScale()));
-        values.add(new SqlDecimal(new BigInteger("-" + Strings.repeat("9", 38)), DECIMAL_TYPE_PRECISION_38.getPrecision(), DECIMAL_TYPE_PRECISION_38.getScale()));
+        values.add(new SqlDecimal(new BigInteger("9".repeat(38)), DECIMAL_TYPE_PRECISION_38.getPrecision(), DECIMAL_TYPE_PRECISION_38.getScale()));
+        values.add(new SqlDecimal(new BigInteger("-" + "9".repeat(38)), DECIMAL_TYPE_PRECISION_38.getPrecision(), DECIMAL_TYPE_PRECISION_38.getScale()));
         nextValue = BigInteger.ONE;
         for (int i = 0; i < 127; i++) {
             values.add(new SqlDecimal(nextValue, 38, 16));
@@ -291,16 +288,16 @@ public abstract class AbstractTestOrcReader
     }
 
     @Test
-    public void testLegacyTimestamp()
+    public void testTimestamp()
             throws Exception
     {
         @SuppressWarnings("deprecation")
         List<SqlTimestamp> values = ImmutableList.of(
-                new SqlTimestamp(0, TimeZoneKey.UTC_KEY),
-                new SqlTimestamp(10, TimeZoneKey.UTC_KEY),
-                new SqlTimestamp(1123456789L, TimeZoneKey.UTC_KEY), // 1970-01-14T00:04:16.789Z
-                new SqlTimestamp(1000123456789L, TimeZoneKey.UTC_KEY), // 2001-09-10T12:04:16.789Z
-                new SqlTimestamp(1575553299564L, TimeZoneKey.UTC_KEY)); // 2019-12-05T13:41:39.564Z
+                SqlTimestamp.fromMillis(3, 0),
+                SqlTimestamp.fromMillis(3, 10),
+                SqlTimestamp.fromMillis(3, 1123456789L), // 1970-01-14T00:04:16.789Z
+                SqlTimestamp.fromMillis(3, 1000123456789L), // 2001-09-10T12:04:16.789Z
+                SqlTimestamp.fromMillis(3, 1575553299564L)); // 2019-12-05T13:41:39.564Z
         tester.testRoundTrip(TIMESTAMP, newArrayList(limit(cycle(values), 30_000)));
     }
 
@@ -415,7 +412,7 @@ public abstract class AbstractTestOrcReader
 
     private static <T> Iterable<T> skipEvery(int n, Iterable<T> iterable)
     {
-        return () -> new AbstractIterator<T>()
+        return () -> new AbstractIterator<>()
         {
             private final Iterator<T> delegate = iterable.iterator();
             private int position;
@@ -441,7 +438,7 @@ public abstract class AbstractTestOrcReader
 
     private static <T> Iterable<T> repeatEach(int n, Iterable<T> iterable)
     {
-        return () -> new AbstractIterator<T>()
+        return () -> new AbstractIterator<>()
         {
             private final Iterator<T> delegate = iterable.iterator();
             private int position;

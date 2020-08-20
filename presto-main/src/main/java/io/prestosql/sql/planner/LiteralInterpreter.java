@@ -52,14 +52,12 @@ import static io.prestosql.spi.StandardErrorCode.TYPE_NOT_FOUND;
 import static io.prestosql.spi.type.VarcharType.VARCHAR;
 import static io.prestosql.sql.analyzer.SemanticExceptions.semanticException;
 import static io.prestosql.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.prestosql.type.DateTimes.parseTime;
+import static io.prestosql.type.DateTimes.parseTimestamp;
+import static io.prestosql.type.DateTimes.parseTimestampWithTimeZone;
 import static io.prestosql.type.JsonType.JSON;
 import static io.prestosql.util.DateTimeUtils.parseDayTimeInterval;
-import static io.prestosql.util.DateTimeUtils.parseLegacyTime;
-import static io.prestosql.util.DateTimeUtils.parseLegacyTimestamp;
 import static io.prestosql.util.DateTimeUtils.parseTimeWithTimeZone;
-import static io.prestosql.util.DateTimeUtils.parseTimeWithoutTimeZone;
-import static io.prestosql.util.DateTimeUtils.parseTimestamp;
-import static io.prestosql.util.DateTimeUtils.parseTimestampWithTimeZone;
 import static io.prestosql.util.DateTimeUtils.parseYearMonthInterval;
 import static java.util.Objects.requireNonNull;
 
@@ -168,10 +166,7 @@ public final class LiteralInterpreter
             Type type = types.get(NodeRef.of(node));
 
             if (type instanceof TimeType) {
-                if (session.isLegacyTimestamp()) {
-                    return parseLegacyTime(session.getTimeZoneKey(), node.getValue());
-                }
-                return parseTimeWithoutTimeZone(node.getValue());
+                return parseTime(node.getValue());
             }
             else if (type instanceof TimeWithTimeZoneType) {
                 return parseTimeWithTimeZone(node.getValue());
@@ -181,18 +176,17 @@ public final class LiteralInterpreter
         }
 
         @Override
-        protected Long visitTimestampLiteral(TimestampLiteral node, ConnectorSession session)
+        protected Object visitTimestampLiteral(TimestampLiteral node, ConnectorSession session)
         {
             Type type = types.get(NodeRef.of(node));
 
             if (type instanceof TimestampType) {
-                if (session.isLegacyTimestamp()) {
-                    return parseLegacyTimestamp(session.getTimeZoneKey(), node.getValue());
-                }
-                return parseTimestamp(node.getValue());
+                int precision = ((TimestampType) type).getPrecision();
+                return parseTimestamp(precision, node.getValue());
             }
             else if (type instanceof TimestampWithTimeZoneType) {
-                return parseTimestampWithTimeZone(node.getValue());
+                int precision = ((TimestampWithTimeZoneType) type).getPrecision();
+                return parseTimestampWithTimeZone(precision, node.getValue());
             }
 
             throw new IllegalStateException("Unexpected type: " + type);

@@ -52,7 +52,7 @@ public class TestingConnectorSession
     private final Instant start;
     private final Map<String, PropertyMetadata<?>> properties;
     private final Map<String, Object> propertyValues;
-    private final boolean isLegacyTimestamp;
+    private final boolean omitTimestampPrecision;
 
     private TestingConnectorSession(
             ConnectorIdentity identity,
@@ -63,7 +63,7 @@ public class TestingConnectorSession
             Instant start,
             List<PropertyMetadata<?>> propertyMetadatas,
             Map<String, Object> propertyValues,
-            boolean isLegacyTimestamp)
+            boolean omitTimestampPrecision)
     {
         this.identity = requireNonNull(identity, "identity is null");
         this.source = requireNonNull(source, "source is null");
@@ -73,7 +73,7 @@ public class TestingConnectorSession
         this.start = start;
         this.properties = Maps.uniqueIndex(propertyMetadatas, PropertyMetadata::getName);
         this.propertyValues = ImmutableMap.copyOf(propertyValues);
-        this.isLegacyTimestamp = isLegacyTimestamp;
+        this.omitTimestampPrecision = omitTimestampPrecision;
     }
 
     @Override
@@ -116,12 +116,6 @@ public class TestingConnectorSession
     public Optional<String> getTraceToken()
     {
         return traceToken;
-    }
-
-    @Override
-    public boolean isLegacyTimestamp()
-    {
-        return isLegacyTimestamp;
     }
 
     @Override
@@ -168,7 +162,7 @@ public class TestingConnectorSession
         private Optional<Instant> start = Optional.empty();
         private List<PropertyMetadata<?>> propertyMetadatas = ImmutableList.of();
         private Map<String, Object> propertyValues = ImmutableMap.of();
-        private boolean isLegacyTimestamp = new FeaturesConfig().isLegacyTimestamp();
+        private boolean omitTimestampPrecision = new FeaturesConfig().isOmitDateTimeTypePrecision();
 
         public Builder setIdentity(ConnectorIdentity identity)
         {
@@ -202,9 +196,9 @@ public class TestingConnectorSession
             return this;
         }
 
-        public Builder setLegacyTimestamp(boolean legacyTimestamp)
+        public Builder setOmitTimestampPrecision(boolean value)
         {
-            isLegacyTimestamp = legacyTimestamp;
+            this.omitTimestampPrecision = value;
             return this;
         }
 
@@ -219,7 +213,7 @@ public class TestingConnectorSession
                     start.orElse(Instant.now()),
                     propertyMetadatas,
                     propertyValues,
-                    isLegacyTimestamp);
+                    omitTimestampPrecision);
         }
     }
 }

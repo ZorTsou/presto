@@ -35,13 +35,14 @@ import io.prestosql.spi.type.SqlTime;
 import io.prestosql.spi.type.SqlTimeWithTimeZone;
 import io.prestosql.spi.type.SqlTimestamp;
 import io.prestosql.spi.type.SqlTimestampWithTimeZone;
+import io.prestosql.spi.type.TimeType;
 import io.prestosql.spi.type.TimeZoneKey;
+import io.prestosql.spi.type.TimestampType;
 import io.prestosql.spi.type.Type;
 import io.prestosql.spi.type.VarcharType;
 
 import java.time.Instant;
 import java.time.LocalDate;
-import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetTime;
 import java.time.ZoneId;
@@ -72,12 +73,11 @@ import static io.prestosql.spi.type.DoubleType.DOUBLE;
 import static io.prestosql.spi.type.IntegerType.INTEGER;
 import static io.prestosql.spi.type.RealType.REAL;
 import static io.prestosql.spi.type.SmallintType.SMALLINT;
-import static io.prestosql.spi.type.TimeType.TIME;
 import static io.prestosql.spi.type.TimeWithTimeZoneType.TIME_WITH_TIME_ZONE;
-import static io.prestosql.spi.type.TimestampType.TIMESTAMP;
 import static io.prestosql.spi.type.TimestampWithTimeZoneType.TIMESTAMP_WITH_TIME_ZONE;
 import static io.prestosql.spi.type.TinyintType.TINYINT;
 import static io.prestosql.spi.type.VarbinaryType.VARBINARY;
+import static io.prestosql.type.DateTimes.scaleEpochMicrosToMillis;
 import static io.prestosql.type.JsonType.JSON;
 import static java.lang.Float.floatToRawIntBits;
 import static java.util.Objects.requireNonNull;
@@ -285,23 +285,24 @@ public class MaterializedResult
             int days = ((SqlDate) value).getDays();
             type.writeLong(blockBuilder, days);
         }
-        else if (TIME.equals(type)) {
+        else if (type instanceof TimeType) {
             SqlTime time = (SqlTime) value;
-            if (time.isLegacyTimestamp()) {
-                type.writeLong(blockBuilder, time.getMillisUtc());
-            }
-            else {
-                type.writeLong(blockBuilder, time.getMillis());
-            }
+            type.writeLong(blockBuilder, time.getPicos());
         }
         else if (TIME_WITH_TIME_ZONE.equals(type)) {
             long millisUtc = ((SqlTimeWithTimeZone) value).getMillisUtc();
             TimeZoneKey timeZoneKey = ((SqlTimeWithTimeZone) value).getTimeZoneKey();
             type.writeLong(blockBuilder, packDateTimeWithZone(millisUtc, timeZoneKey));
         }
-        else if (TIMESTAMP.equals(type)) {
-            long millisUtc = ((SqlTimestamp) value).getMillisUtc();
-            type.writeLong(blockBuilder, millisUtc);
+        else if (type instanceof TimestampType) {
+            long micros = ((SqlTimestamp) value).getEpochMicros();
+            int precision = ((TimestampType) type).getPrecision();
+            if (precision <= 3) {
+                type.writeLong(blockBuilder, scaleEpochMicrosToMillis(micros));
+            }
+            else {
+                type.writeLong(blockBuilder, micros);
+            }
         }
         else if (TIMESTAMP_WITH_TIME_ZONE.equals(type)) {
             long millisUtc = ((SqlTimestampWithTimeZone) value).getMillisUtc();
@@ -380,7 +381,7 @@ public class MaterializedResult
                         zone);
             }
             else if (prestoValue instanceof SqlTimestamp) {
-                convertedValue = SqlTimestamp.JSON_FORMATTER.parse(prestoValue.toString(), LocalDateTime::from);
+                convertedValue = ((SqlTimestamp) prestoValue).toLocalDateTime();
             }
             else if (prestoValue instanceof SqlTimestampWithTimeZone) {
                 convertedValue = Instant.ofEpochMilli(((SqlTimestampWithTimeZone) prestoValue).getMillisUtc())

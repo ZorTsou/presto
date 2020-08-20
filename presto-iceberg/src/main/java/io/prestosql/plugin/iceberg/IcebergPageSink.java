@@ -16,7 +16,6 @@ package io.prestosql.plugin.iceberg;
 import com.google.common.collect.ImmutableList;
 import io.airlift.json.JsonCodec;
 import io.airlift.slice.Slice;
-import io.prestosql.plugin.hive.FileWriter;
 import io.prestosql.plugin.hive.HdfsEnvironment;
 import io.prestosql.plugin.hive.HdfsEnvironment.HdfsContext;
 import io.prestosql.plugin.iceberg.PartitionTransforms.ColumnTransform;
@@ -44,14 +43,9 @@ import io.prestosql.spi.type.VarcharType;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.iceberg.FileFormat;
-import org.apache.iceberg.Metrics;
-import org.apache.iceberg.MetricsConfig;
 import org.apache.iceberg.PartitionField;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
-import org.apache.iceberg.hadoop.HadoopInputFile;
-import org.apache.iceberg.orc.OrcMetrics;
-import org.apache.iceberg.parquet.ParquetUtil;
 import org.apache.iceberg.transforms.Transform;
 
 import java.util.ArrayList;
@@ -70,7 +64,6 @@ import static io.airlift.slice.Slices.wrappedBuffer;
 import static io.prestosql.plugin.hive.util.ConfigurationUtils.toJobConf;
 import static io.prestosql.plugin.iceberg.IcebergErrorCode.ICEBERG_TOO_MANY_OPEN_PARTITIONS;
 import static io.prestosql.plugin.iceberg.PartitionTransforms.getColumnTransform;
-import static io.prestosql.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.prestosql.spi.type.DateTimeEncoding.unpackMillisUtc;
 import static io.prestosql.spi.type.Decimals.readBigDecimal;
 import static java.lang.Float.intBitsToFloat;
@@ -93,8 +86,8 @@ public class IcebergPageSink
     private final String outputPath;
     private final IcebergFileWriterFactory fileWriterFactory;
     private final HdfsEnvironment hdfsEnvironment;
+    private final HdfsContext hdfsContext;
     private final JobConf jobConf;
-    private final List<IcebergColumnHandle> inputColumns;
     private final JsonCodec<CommitTaskData> jsonCodec;
     private final ConnectorSession session;
     private final FileFormat fileFormat;
@@ -125,12 +118,11 @@ public class IcebergPageSink
         this.outputPath = requireNonNull(outputPath, "outputPath is null");
         this.fileWriterFactory = requireNonNull(fileWriterFactory, "fileWriterFactory is null");
         this.hdfsEnvironment = requireNonNull(hdfsEnvironment, "hdfsEnvironment is null");
-        requireNonNull(hdfsContext, "hdfsContext is null");
+        this.hdfsContext = requireNonNull(hdfsContext, "hdfsContext is null");
         this.jobConf = toJobConf(hdfsEnvironment.getConfiguration(hdfsContext, new Path(outputPath)));
         this.jsonCodec = requireNonNull(jsonCodec, "jsonCodec is null");
         this.session = requireNonNull(session, "session is null");
         this.fileFormat = requireNonNull(fileFormat, "fileFormat is null");
-        this.inputColumns = ImmutableList.copyOf(inputColumns);
         this.pagePartitioner = new PagePartitioner(pageIndexerFactory, toPartitionColumns(inputColumns, partitionSpec));
     }
 
@@ -170,7 +162,7 @@ public class IcebergPageSink
 
             CommitTaskData task = new CommitTaskData(
                     context.getPath().toString(),
-                    new MetricsWrapper(readMetrics(context.getPath())),
+                    new MetricsWrapper(context.writer.getMetrics()),
                     context.getPartitionData().map(PartitionData::toJson));
 
             commitTasks.add(wrappedBuffer(jsonCodec.toJsonBytes(task)));
@@ -258,7 +250,7 @@ public class IcebergPageSink
                 pageForWriter = pageForWriter.getPositions(positions, 0, positions.length);
             }
 
-            FileWriter writer = writers.get(index).getWriter();
+            IcebergFileWriter writer = writers.get(index).getWriter();
 
             long currentWritten = writer.getWrittenBytes();
             long currentMemory = writer.getSystemMemoryUsage();
@@ -312,28 +304,15 @@ public class IcebergPageSink
         outputPath = new Path(outputPath, randomUUID().toString());
         outputPath = new Path(fileFormat.addExtension(outputPath.toString()));
 
-        FileWriter writer = fileWriterFactory.createFileWriter(
+        IcebergFileWriter writer = fileWriterFactory.createFileWriter(
                 outputPath,
                 outputSchema,
-                inputColumns,
                 jobConf,
                 session,
+                hdfsContext,
                 fileFormat);
 
         return new WriteContext(writer, outputPath, partitionData);
-    }
-
-    @SuppressWarnings("SwitchStatementWithTooFewBranches")
-    private Metrics readMetrics(Path path)
-    {
-        switch (fileFormat) {
-            case PARQUET:
-                return ParquetUtil.fileMetrics(HadoopInputFile.fromPath(path, jobConf), MetricsConfig.getDefault());
-            case ORC:
-                // TODO: update Iceberg version after OrcMetrics is completed
-                return OrcMetrics.fromInputFile(HadoopInputFile.fromPath(path, jobConf), jobConf);
-        }
-        throw new PrestoException(NOT_SUPPORTED, "File format not supported for Iceberg: " + fileFormat);
     }
 
     private static Optional<PartitionData> getPartitionData(List<PartitionColumn> columns, Page page, int position)
@@ -417,18 +396,18 @@ public class IcebergPageSink
 
     private static class WriteContext
     {
-        private final FileWriter writer;
+        private final IcebergFileWriter writer;
         private final Path path;
         private final Optional<PartitionData> partitionData;
 
-        public WriteContext(FileWriter writer, Path path, Optional<PartitionData> partitionData)
+        public WriteContext(IcebergFileWriter writer, Path path, Optional<PartitionData> partitionData)
         {
             this.writer = requireNonNull(writer, "writer is null");
             this.path = requireNonNull(path, "path is null");
             this.partitionData = requireNonNull(partitionData, "partitionData is null");
         }
 
-        public FileWriter getWriter()
+        public IcebergFileWriter getWriter()
         {
             return writer;
         }

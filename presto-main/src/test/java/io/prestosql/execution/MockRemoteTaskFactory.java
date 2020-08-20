@@ -167,6 +167,8 @@ public class MockRemoteTaskFactory
 
         private final PartitionedSplitCountTracker partitionedSplitCountTracker;
 
+        private boolean isOutputBufferOverUtilized;
+
         public MockRemoteTask(
                 TaskId taskId,
                 PlanFragment fragment,
@@ -242,13 +244,14 @@ public class MockRemoteTaskFactory
                             failures,
                             0,
                             0,
-                            false,
+                            isOutputBufferOverUtilized,
                             DataSize.ofBytes(0),
                             DataSize.ofBytes(0),
                             DataSize.ofBytes(0),
                             DataSize.ofBytes(0),
                             0,
-                            new Duration(0, MILLISECONDS)),
+                            new Duration(0, MILLISECONDS),
+                            ImmutableMap.of()),
                     DateTime.now(),
                     outputBuffer.getInfo(),
                     ImmutableSet.of(),
@@ -270,13 +273,14 @@ public class MockRemoteTaskFactory
                     ImmutableList.of(),
                     stats.getQueuedPartitionedDrivers(),
                     stats.getRunningPartitionedDrivers(),
-                    false,
+                    isOutputBufferOverUtilized,
                     stats.getPhysicalWrittenDataSize(),
                     stats.getUserMemoryReservation(),
                     stats.getSystemMemoryReservation(),
                     stats.getRevocableMemoryReservation(),
                     0,
-                    new Duration(0, MILLISECONDS));
+                    new Duration(0, MILLISECONDS),
+                    ImmutableMap.of());
         }
 
         private synchronized void updateSplitQueueSpace()
@@ -319,6 +323,11 @@ public class MockRemoteTaskFactory
             runningDrivers = splits.size();
             runningDrivers = Math.min(runningDrivers, maxRunning);
             updateSplitQueueSpace();
+        }
+
+        public synchronized void setOutputBufferOverUtilized(boolean isOutputBufferOverUtilized)
+        {
+            this.isOutputBufferOverUtilized = isOutputBufferOverUtilized;
         }
 
         @Override

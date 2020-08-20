@@ -21,6 +21,8 @@ import io.prestosql.operator.window.WindowFunctionSupplier;
 import io.prestosql.spi.PrestoException;
 import io.prestosql.spi.block.BlockEncoding;
 import io.prestosql.spi.block.BlockEncodingSerde;
+import io.prestosql.spi.connector.AggregateFunction;
+import io.prestosql.spi.connector.AggregationApplicationResult;
 import io.prestosql.spi.connector.CatalogSchemaName;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.connector.ColumnMetadata;
@@ -33,7 +35,9 @@ import io.prestosql.spi.connector.ConstraintApplicationResult;
 import io.prestosql.spi.connector.LimitApplicationResult;
 import io.prestosql.spi.connector.ProjectionApplicationResult;
 import io.prestosql.spi.connector.SampleType;
+import io.prestosql.spi.connector.SortItem;
 import io.prestosql.spi.connector.SystemTable;
+import io.prestosql.spi.connector.TopNApplicationResult;
 import io.prestosql.spi.expression.ConnectorExpression;
 import io.prestosql.spi.function.InvocationConvention;
 import io.prestosql.spi.function.OperatorType;
@@ -177,6 +181,11 @@ public interface Metadata
      * Comments to the specified table.
      */
     void setTableComment(Session session, TableHandle tableHandle, Optional<String> comment);
+
+    /**
+     * Comments to the specified column.
+     */
+    void setColumnComment(Session session, TableHandle tableHandle, ColumnHandle column, Optional<String> comment);
 
     /**
      * Rename the specified column.
@@ -353,6 +362,20 @@ public interface Metadata
 
     Optional<TableHandle> applySample(Session session, TableHandle table, SampleType sampleType, double sampleRatio);
 
+    Optional<AggregationApplicationResult<TableHandle>> applyAggregation(
+            Session session,
+            TableHandle table,
+            List<AggregateFunction> aggregations,
+            Map<String, ColumnHandle> assignments,
+            List<List<ColumnHandle>> groupingSets);
+
+    Optional<TopNApplicationResult<TableHandle>> applyTopN(
+            Session session,
+            TableHandle handle,
+            long topNCount,
+            List<SortItem> sortItems,
+            Map<String, ColumnHandle> assignments);
+
     default void validateScan(Session session, TableHandle table) {}
 
     //
@@ -454,6 +477,8 @@ public interface Metadata
     void addFunctions(List<? extends SqlFunction> functions);
 
     List<FunctionMetadata> listFunctions();
+
+    ResolvedFunction decodeFunction(QualifiedName name);
 
     ResolvedFunction resolveFunction(QualifiedName name, List<TypeSignatureProvider> parameterTypes);
 

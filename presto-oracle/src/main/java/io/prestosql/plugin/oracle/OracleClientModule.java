@@ -53,6 +53,16 @@ public class OracleClientModule
         Properties connectionProperties = new Properties();
         connectionProperties.setProperty(OracleConnection.CONNECTION_PROPERTY_INCLUDE_SYNONYMS, String.valueOf(oracleConfig.isSynonymsEnabled()));
 
+        if (oracleConfig.isConnectionPoolEnabled()) {
+            return new OraclePoolConnectionFactory(
+                    config.getConnectionUrl(),
+                    connectionProperties,
+                    credentialProvider,
+                    oracleConfig.getConnectionPoolMinSize(),
+                    oracleConfig.getConnectionPoolMaxSize(),
+                    oracleConfig.getInactiveConnectionTimeout());
+        }
+
         return new DriverConnectionFactory(
                 new OracleDriver(),
                 config.getConnectionUrl(),
